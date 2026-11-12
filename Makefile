@@ -14,6 +14,13 @@ $(if $(findstring $(space),$(TOPDIR)),$(error ERROR: The path to the OpenWrt dir
 
 world:
 
+ifneq ($(OPENWRT_PATH_SANITIZED),1)
+  _SANITIZED_PATH:=$(shell sh $(TOPDIR)/scripts/sanitize-path.sh)
+  export PATH:=$(_SANITIZED_PATH)
+  export ORIG_PATH:=$(_SANITIZED_PATH)
+  export OPENWRT_PATH_SANITIZED:=1
+endif
+
 DISTRO_PKG_CONFIG:=$(shell $(TOPDIR)/scripts/command_all.sh pkg-config | grep -e '/usr' -e '/nix/store' -m 1)
 
 export ORIG_PATH:=$(if $(ORIG_PATH),$(ORIG_PATH),$(PATH))

@@ -171,7 +171,7 @@ endef
 
 else
 
-RUST_HOST_SYSROOT:=$(or $(call qstrip,$(CONFIG_RUST_TOOLCHAIN_HOST_PATH)),$(shell PATH=$(ORIG_PATH) rustc --print sysroot 2>/dev/null))
+RUST_HOST_SYSROOT:=$(or $(call qstrip,$(CONFIG_RUST_TOOLCHAIN_HOST_PATH)),$(shell PATH="$(ORIG_PATH)" rustc --print sysroot 2>/dev/null))
 
 define Host/Prepare/Toolchain
 	[ "$$$$($(RUST_HOST_SYSROOT)/bin/rustc --version | cut -d' ' -f2)" = "$(PKG_VERSION)" ] || { \

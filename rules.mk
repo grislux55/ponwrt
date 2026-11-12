@@ -254,6 +254,13 @@ BUILD_DIR_HOST:=$(if $(IS_PACKAGE_BUILD),$(BUILD_DIR_BASE)/hostpkg,$(BUILD_DIR_B
 STAGING_DIR_HOST:=$(abspath $(STAGING_DIR)/../host)
 STAGING_DIR_HOSTPKG:=$(abspath $(STAGING_DIR)/../hostpkg)
 
+ifneq ($(OPENWRT_PATH_SANITIZED),1)
+  _SANITIZED_PATH:=$(shell sh $(TOPDIR)/scripts/sanitize-path.sh)
+  export PATH:=$(_SANITIZED_PATH)
+  export ORIG_PATH:=$(_SANITIZED_PATH)
+  export OPENWRT_PATH_SANITIZED:=1
+endif
+
 TARGET_PATH:=$(subst $(space),:,$(filter-out .,$(filter-out ./,$(subst :,$(space),$(PATH)))))
 TARGET_INIT_PATH:=$(call qstrip,$(CONFIG_TARGET_INIT_PATH))
 TARGET_INIT_PATH:=$(if $(TARGET_INIT_PATH),$(TARGET_INIT_PATH),/usr/sbin:/sbin:/usr/bin:/bin)

@@ -6,6 +6,11 @@ case $PATH in
 	(*[!:]:) PATH="$PATH:" ;;
 esac
 
-for ELEMENT in $(echo $PATH | tr ":" "\n"); do
-        PATH=$ELEMENT command -v "$@"
+old_ifs=$IFS
+IFS=:
+set -f
+for ELEMENT in $PATH; do
+	[ -n "$ELEMENT" ] && PATH="$ELEMENT" command -v "$@"
 done
+set +f
+IFS=$old_ifs
