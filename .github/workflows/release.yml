@@ -1,40 +1,141 @@
-name: Release PonWrt
+name: NNRRWrt CI & Release
 
 on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag
-        required: true
+        description: Release tag (required when create_release is enabled)
+        required: false
+        default: ''
         type: string
       prerelease:
         description: Mark as prerelease
-        required: true
+        required: false
         default: true
         type: boolean
+      create_release:
+        description: Create GitHub Release after build succeeds
+        required: false
+        default: false
+        type: boolean
+      targets:
+        description: Build target matrix
+        required: false
+        default: an7581
+        type: choice
+        options:
+          - an7581
+          - all
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ inputs.tag }}
-  cancel-in-progress: false
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch' }}
 
 jobs:
+  sanitize:
+    name: Sanitization & Secret Scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          GITLEAKS_VERSION="8.30.1"
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+
+      - name: Run gitleaks secret scan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ] && [ -n "$PR_BASE_SHA" ]; then
+            gitleaks git . --config .gitleaks.toml --no-banner --redact --log-opts="${PR_BASE_SHA}..${PR_HEAD_SHA}"
+          else
+            gitleaks git . --config .gitleaks.toml --no-banner --redact --log-opts="-n 50"
+          fi
+          for dir in configs target/linux/airoha scripts .github; do
+            gitleaks dir "$dir" --config .gitleaks.toml --no-banner --redact
+          done
+
+      - name: Run repository sanitization rules
+        run: ./.github/scripts/check-sanitization.sh
+
+  static-checks:
+    name: Static Checks
+    needs: sanitize
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      targets: ${{ steps.matrix.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install static check & kconfig dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bzip2 file gawk git libncurses-dev perl python3 \
+            shellcheck unzip xz-utils
+          ACTIONLINT_VERSION="1.7.12"
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" -o /tmp/actionlint.tar.gz
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
+
+      - name: Run repository static checks
+        run: ./.github/scripts/check-static.sh
+
+      - name: Update and install feeds for defconfig check
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Verify merged Kconfig and defconfig
+        run: ./.github/scripts/check-static.sh --with-defconfig
+
+      - name: Compute build target matrix
+        id: matrix
+        env:
+          GITHUB_REF_NAME_FULL: ${{ github.ref }}
+          INPUT_TARGETS: ${{ inputs.targets }}
+        run: |
+          if [[ "$GITHUB_REF_NAME_FULL" == refs/tags/v* ]] || [ "$INPUT_TARGETS" = "all" ]; then
+            echo 'targets=["an7581","an7583"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'targets=["an7581"]' >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: Build ${{ matrix.target }}
+    needs: [sanitize, static-checks]
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     environment: release
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - an7581
-          - an7583
+        target: ${{ fromJson(needs.static-checks.outputs.targets) }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - name: Free build space
         run: |
@@ -81,11 +182,17 @@ jobs:
           fi
 
       - name: Configure ${{ matrix.target }}
+        env:
+          TARGET_NAME: ${{ matrix.target }}
         run: |
           ./scripts/kconfig.pl + \
-            "configs/${{ matrix.target }}.config" \
+            "configs/${TARGET_NAME}.config" \
             configs/release.config > .config
           make defconfig
+          if [ "$TARGET_NAME" = "an7581" ]; then
+            grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y$' .config
+            grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi-usb-sfp=y$' .config
+          fi
 
       - name: Download sources
         run: make download -j"$(nproc)"
@@ -93,28 +200,50 @@ jobs:
       - name: Build ${{ matrix.target }}
         run: make -j"$(nproc)"
 
-      - name: Pack ${{ matrix.target }}
+      - name: Remove temporary private signing key
+        if: always()
+        run: rm -f private-key.pem
+
+      - name: Verify XG-040G-MD baseline images
+        if: matrix.target == 'an7581'
         run: |
-          mkdir release
-          tar --zstd -cf "release/ponwrt-${{ matrix.target }}.tar.zst" \
-            -C bin/targets/airoha "${{ matrix.target }}"
+          ls -lh bin/targets/airoha/an7581/*nokia_xg-040g-md-ubi*itb
+          test -s bin/targets/airoha/an7581/*nokia_xg-040g-md-ubi-initramfs-recovery.itb
+          test -s bin/targets/airoha/an7581/*nokia_xg-040g-md-ubi-squashfs-sysupgrade.itb
+          test -s bin/targets/airoha/an7581/*nokia_xg-040g-md-ubi-usb-sfp-initramfs-recovery.itb
+          test -s bin/targets/airoha/an7581/*nokia_xg-040g-md-ubi-usb-sfp-squashfs-sysupgrade.itb
+
+      - name: Pack ${{ matrix.target }}
+        env:
+          TARGET_NAME: ${{ matrix.target }}
+        run: |
+          mkdir -p release
+          tar --zstd -cf "release/ponwrt-${TARGET_NAME}.tar.zst" \
+            -C bin/targets/airoha "${TARGET_NAME}"
+          if [ "$TARGET_NAME" = "an7581" ]; then
+            cp bin/targets/airoha/an7581/*nokia_xg-040g-md-ubi*itb release/
+          fi
+          ./.github/scripts/check-sanitization.sh --check-artifacts release
 
       - name: Upload ${{ matrix.target }}
         uses: actions/upload-artifact@v4
         with:
           name: ponwrt-${{ matrix.target }}
-          path: release/*.tar.zst
+          path: release/*
           if-no-files-found: error
           retention-days: 7
 
   release:
     name: Create release
-    needs: build
+    needs: [sanitize, static-checks, build]
+    if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.create_release && inputs.tag != '') }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download firmware archives
         uses: actions/download-artifact@v4
         with:
@@ -122,26 +251,39 @@ jobs:
           path: release
           merge-multiple: true
 
+      - name: Verify release artifacts are sanitized
+        run: ./.github/scripts/check-sanitization.sh --check-artifacts release
+
       - name: Create checksums
         working-directory: release
-        run: sha256sum *.tar.zst > sha256sums
+        run: rm -f sha256sums && sha256sum -- * > sha256sums
 
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.tag }}
-          PRERELEASE: ${{ inputs.prerelease }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          PRERELEASE_INPUT: ${{ inputs.prerelease }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
+          prerelease=false
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            [ "$PRERELEASE_INPUT" = "true" ] && prerelease=true
+          elif [[ "$RELEASE_TAG" == *-* ]]; then
+            prerelease=true
+          fi
           args=(
             "$RELEASE_TAG"
-            release/*.tar.zst
-            release/sha256sums
+            release/*
             --repo "$GITHUB_REPOSITORY"
             --target "$GITHUB_SHA"
-            --title "PonWrt $RELEASE_TAG"
+            --title "NNRRWrt $RELEASE_TAG"
             --generate-notes
           )
-          if [ "$PRERELEASE" = true ]; then
+          if [ "$prerelease" = true ]; then
             args+=(--prerelease)
           fi
-          gh release create "${args[@]}"
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "${args[@]}"
+          fi

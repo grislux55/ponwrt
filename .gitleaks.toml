@@ -1,0 +1,28 @@
+title = "NNRRWrt PonWrt Gitleaks Config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow upstream reference test keys and build cache directories"
+paths = [
+  '''^package/boot/arm-trusted-firmware-microchipsw/src/keys/.*\.pem$''',
+  '''^dl/''',
+  '''^feeds/''',
+  '''^build_dir/''',
+  '''^staging_dir/''',
+  '''^bin/'''
+]
+
+[[rules]]
+id = "ponwrt-apk-private-key-literal"
+description = "Hardcoded PONWRT_APK_PRIVATE_KEY or PEM private key"
+regex = '''-----BEGIN (RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----'''
+tags = ["key", "private"]
+
+[[rules]]
+id = "feeds-local-src-link"
+description = "Local src-link or personal home path in feeds.conf.default"
+regex = '''(?m)^[[:space:]]*src-link[[:space:]]+'''
+path = '''^feeds\.conf\.default$'''
+tags = ["sanitization", "feeds"]
