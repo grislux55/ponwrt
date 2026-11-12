@@ -53,6 +53,13 @@ grep -qE '^src-git[[:space:]]+pon_drivers[[:space:]]+https://' feeds.conf.defaul
 grep -qE '^src-git[[:space:]]+pon_userspace[[:space:]]+https://' feeds.conf.default || fail "feeds.conf.default missing https:// pon_userspace"
 grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y$' configs/an7581.config || fail "an7581.config missing nokia_xg-040g-md-ubi"
 grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi-usb-sfp=y$' configs/an7581.config || fail "an7581.config missing nokia_xg-040g-md-ubi-usb-sfp"
+[ -f configs/nnrrwrt-xg040g-md.config ] || fail "Missing configs/nnrrwrt-xg040g-md.config"
+grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y$' configs/nnrrwrt-xg040g-md.config || fail "nnrrwrt-xg040g-md.config missing nokia_xg-040g-md-ubi"
+grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi-usb-sfp=y$' configs/nnrrwrt-xg040g-md.config || fail "nnrrwrt-xg040g-md.config missing nokia_xg-040g-md-ubi-usb-sfp"
+grep -q '^CONFIG_VERSION_DIST="NNRRWrt"$' configs/nnrrwrt-xg040g-md.config || fail "nnrrwrt-xg040g-md.config missing VERSION_DIST=NNRRWrt"
+if grep -qE '^CONFIG_PACKAGE_(wpad|hostapd|wifi-scripts|wireless-regdb|iw|kmod-cfg80211|kmod-mac80211|kmod-mt76|kmod-mt79).*=[ym]$' configs/nnrrwrt-xg040g-md.config; then
+	fail "nnrrwrt-xg040g-md.config must not enable wireless stack or drivers"
+fi
 grep -q '^define Device/nokia_xg-040g-md-ubi$' target/linux/airoha/image/an7581.mk || fail "an7581.mk missing Device/nokia_xg-040g-md-ubi"
 grep -q 'DEVICE_PACKAGES' target/linux/airoha/image/an7581.mk || fail "an7581.mk missing DEVICE_PACKAGES"
 [ -f configs/release.config ] || fail "Missing configs/release.config"
@@ -71,11 +78,37 @@ echo "[OK] Verified $patch_count kernel patches in target/linux/airoha/patches-6
 
 echo "[5/5] Checking kconfig / defconfig consistency..."
 if [ "$WITH_DEFCONFIG" -eq 1 ]; then
+	backup_cfg=""
+	if [ -f .config ]; then
+		backup_cfg="$(mktemp)"
+		cp .config "$backup_cfg"
+	fi
+	restore_cfg() {
+		if [ -n "$backup_cfg" ] && [ -f "$backup_cfg" ]; then
+			mv "$backup_cfg" .config
+		fi
+	}
+	trap restore_cfg EXIT
+
 	./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
 	make defconfig
 	grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y$' .config || fail "make defconfig dropped nokia_xg-040g-md-ubi"
 	grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi-usb-sfp=y$' .config || fail "make defconfig dropped nokia_xg-040g-md-ubi-usb-sfp"
-	echo "[OK] make defconfig preserved XG-040G-MD profiles"
+	echo "[OK] make defconfig preserved baseline an7581 XG-040G-MD profiles"
+
+	cp configs/nnrrwrt-xg040g-md.config .config
+	make defconfig
+	grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y$' .config || fail "nnrrwrt-xg040g-md defconfig dropped nokia_xg-040g-md-ubi"
+	grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi-usb-sfp=y$' .config || fail "nnrrwrt-xg040g-md defconfig dropped nokia_xg-040g-md-ubi-usb-sfp"
+	grep -q '^CONFIG_VERSION_DIST="NNRRWrt"$' .config || fail "nnrrwrt-xg040g-md defconfig dropped VERSION_DIST"
+	grep -q '^CONFIG_PACKAGE_airoha-ponctl=y$' .config || fail "nnrrwrt-xg040g-md defconfig missing airoha-ponctl"
+	grep -q '^CONFIG_PACKAGE_airoha-pond=y$' .config || fail "nnrrwrt-xg040g-md defconfig missing airoha-pond"
+	grep -q '^CONFIG_PACKAGE_luci-app-pon=y$' .config || fail "nnrrwrt-xg040g-md defconfig missing luci-app-pon"
+	grep -q '^CONFIG_PACKAGE_luci-app-iptv=y$' .config || fail "nnrrwrt-xg040g-md defconfig missing luci-app-iptv"
+	if grep -qE '^CONFIG_PACKAGE_(wpad|hostapd|wifi-scripts|wireless-regdb|iw|kmod-cfg80211|kmod-mac80211|kmod-mt76|kmod-mt79).*=[ym]$' .config; then
+		fail "nnrrwrt-xg040g-md defconfig unexpectedly enabled wireless stack or drivers"
+	fi
+	echo "[OK] make defconfig verified nnrrwrt-xg040g-md config"
 else
 	echo "[INFO] Skipping make defconfig (pass --with-defconfig after feeds install)"
 fi

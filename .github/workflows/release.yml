@@ -29,9 +29,10 @@ on:
       targets:
         description: Build target matrix
         required: false
-        default: an7581
+        default: nnrrwrt-xg040g-md
         type: choice
         options:
+          - nnrrwrt-xg040g-md
           - an7581
           - all
 
@@ -118,9 +119,11 @@ jobs:
           INPUT_TARGETS: ${{ inputs.targets }}
         run: |
           if [[ "$GITHUB_REF_NAME_FULL" == refs/tags/v* ]] || [ "$INPUT_TARGETS" = "all" ]; then
-            echo 'targets=["an7581","an7583"]' >> "$GITHUB_OUTPUT"
-          else
+            echo 'targets=["nnrrwrt-xg040g-md","an7581","an7583"]' >> "$GITHUB_OUTPUT"
+          elif [ "$INPUT_TARGETS" = "an7581" ]; then
             echo 'targets=["an7581"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'targets=["nnrrwrt-xg040g-md"]' >> "$GITHUB_OUTPUT"
           fi
 
   build:
@@ -185,11 +188,15 @@ jobs:
         env:
           TARGET_NAME: ${{ matrix.target }}
         run: |
-          ./scripts/kconfig.pl + \
-            "configs/${TARGET_NAME}.config" \
-            configs/release.config > .config
+          if [ "$TARGET_NAME" = "nnrrwrt-xg040g-md" ]; then
+            cp configs/nnrrwrt-xg040g-md.config .config
+          else
+            ./scripts/kconfig.pl + \
+              "configs/${TARGET_NAME}.config" \
+              configs/release.config > .config
+          fi
           make defconfig
-          if [ "$TARGET_NAME" = "an7581" ]; then
+          if [ "$TARGET_NAME" = "an7581" ] || [ "$TARGET_NAME" = "nnrrwrt-xg040g-md" ]; then
             grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y$' .config
             grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi-usb-sfp=y$' .config
           fi
@@ -205,7 +212,7 @@ jobs:
         run: rm -f private-key.pem
 
       - name: Verify XG-040G-MD baseline images
-        if: matrix.target == 'an7581'
+        if: matrix.target == 'an7581' || matrix.target == 'nnrrwrt-xg040g-md'
         run: |
           ls -lh bin/targets/airoha/an7581/*nokia_xg-040g-md-ubi*itb
           test -s bin/targets/airoha/an7581/*nokia_xg-040g-md-ubi-initramfs-recovery.itb
@@ -218,9 +225,15 @@ jobs:
           TARGET_NAME: ${{ matrix.target }}
         run: |
           mkdir -p release
-          tar --zstd -cf "release/ponwrt-${TARGET_NAME}.tar.zst" \
-            -C bin/targets/airoha "${TARGET_NAME}"
-          if [ "$TARGET_NAME" = "an7581" ]; then
+          subtarget_dir="$TARGET_NAME"
+          archive_name="ponwrt-${TARGET_NAME}.tar.zst"
+          if [ "$TARGET_NAME" = "nnrrwrt-xg040g-md" ]; then
+            subtarget_dir="an7581"
+            archive_name="nnrrwrt-xg040g-md.tar.zst"
+          fi
+          tar --zstd -cf "release/${archive_name}" \
+            -C bin/targets/airoha "${subtarget_dir}"
+          if [ "$TARGET_NAME" = "an7581" ] || [ "$TARGET_NAME" = "nnrrwrt-xg040g-md" ]; then
             cp bin/targets/airoha/an7581/*nokia_xg-040g-md-ubi*itb release/
           fi
           ./.github/scripts/check-sanitization.sh --check-artifacts release
@@ -228,7 +241,7 @@ jobs:
       - name: Upload ${{ matrix.target }}
         uses: actions/upload-artifact@v4
         with:
-          name: ponwrt-${{ matrix.target }}
+          name: firmware-${{ matrix.target }}
           path: release/*
           if-no-files-found: error
           retention-days: 7
@@ -247,7 +260,7 @@ jobs:
       - name: Download firmware archives
         uses: actions/download-artifact@v4
         with:
-          pattern: ponwrt-*
+          pattern: firmware-*
           path: release
           merge-multiple: true
 
