@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grislux55 <jebchou.hg@gmail.com>
+Date: Fri, 13 Nov 2026 00:00:00 +0800
+Subject: [PATCH] firewall4: exclude br-iptv and isolated bridges from bridge
+ flowtable
+
+Exclude br-iptv (and any bridges listed in firewall defaults
+flow_offloading_bridge_exclude) from resolve_bridge_devices() so
+dedicated IPTV ports and isolated lower devices are not added to
+table bridge fw4 flowtable fb when unused by other bridges.
+
+Also guard table bridge fw4 chain forward with meta ibrname / obrname
+early return rules for excluded bridges so single-line multiplexing
+(sharing pon0 across br-bridge and br-iptv) never offloads br-iptv
+flows or bypasses table bridge iptv filtering.
+
+Signed-off-by: grislux55 <jebchou.hg@gmail.com>
+---
+diff -uNr a/root/usr/share/firewall4/templates/ruleset.uc b/root/usr/share/firewall4/templates/ruleset.uc
+--- a/root/usr/share/firewall4/templates/ruleset.uc	2026-11-13 01:55:20.599296887 +0800
++++ b/root/usr/share/firewall4/templates/ruleset.uc	2026-11-13 01:56:28.337298266 +0800
+@@ -493,6 +493,7 @@
+ delete flowtable bridge fw4 fb
+ {% endif %}
+ 
++{% let excluded_bridges = fw4.resolve_bridge_exclude(); %}
+ {% let bridge_devices = fw4.resolve_bridge_devices(flowtable_devices); %}
+ {% if (length(bridge_devices) > 0): %}
+ table bridge fw4 {
+@@ -510,6 +511,10 @@
+ 
+ 	chain forward {
+ 		type filter hook forward priority filter; policy accept;
++{% if (length(excluded_bridges) > 0): %}
++		meta ibrname {{ fw4.set(excluded_bridges) }} return
++		meta obrname {{ fw4.set(excluded_bridges) }} return
++{% endif %}
+ 		meta l4proto { tcp, udp } flow offload @fb;
+ 	}
+ }
+diff -uNr a/root/usr/share/ucode/fw4.uc b/root/usr/share/ucode/fw4.uc
+--- a/root/usr/share/ucode/fw4.uc	2026-11-13 01:55:20.599671702 +0800
++++ b/root/usr/share/ucode/fw4.uc	2026-11-13 01:56:28.336796940 +0800
+@@ -618,12 +618,33 @@
+ 		return false;
+ 	},
+ 
++	resolve_bridge_exclude: function() {
++		let excluded = [ "br-iptv" ];
++		let custom = this.default_option("flow_offloading_bridge_exclude");
++
++		if (type(custom) == "array") {
++			for (let name in custom)
++				if (type(name) == "string" && length(name))
++					push(excluded, name);
++		}
++
++		return sort(uniq(excluded));
++	},
++
++	resolve_bridge_port_master: function(port) {
++		let target = fs.readlink(`/sys/class/net/${port}/brport/bridge`) ??
++			fs.readlink(`/sys/class/net/${port}/master`);
++
++		return target ? fs.basename(target) : null;
++	},
++
+ 	resolve_bridge_devices: function(devices) {
+ 		let bridge_devs = [];
+ 
+ 		if (!length(devices))
+ 			return bridge_devs;
+ 
++		let excluded = this.resolve_bridge_exclude();
+ 		let devstatus = {};
+ 		let bus = ubus.connect();
+ 		if (bus) {
+@@ -635,10 +656,17 @@
+ 		let entry;
+ 
+ 		if (dir) {
+-			while ((entry = dir.read()) != null)
+-				if (fs.access(`/sys/class/net/${entry}/brport`))
++			while ((entry = dir.read()) != null) {
++				if (fs.access(`/sys/class/net/${entry}/brport`)) {
++					let master = this.resolve_bridge_port_master(entry);
++
++					if (master && (master in excluded))
++						continue;
++
+ 					push(bridge_devs,
+ 						...resolve_lower_devices(devstatus, entry));
++				}
++			}
+ 
+ 			dir.close();
+ 		}
+@@ -2132,6 +2160,7 @@
+ 			disable_ipv6: [ "bool", null, UNSUPPORTED ],
+ 			flow_offloading: [ "bool", "0" ],
+ 			flow_offloading_hw: [ "bool", "0" ],
++			flow_offloading_bridge_exclude: [ "string", null, PARSE_LIST ],
+ 
+ 			auto_includes: [ "bool", "1" ]
+ 		});
