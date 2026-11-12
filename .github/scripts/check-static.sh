@@ -23,12 +23,19 @@ posix_scripts=(
 	scripts/sanitize-path.sh
 	scripts/command_all.sh
 )
-mapfile -t airoha_scripts < <(find target/linux/airoha -type f \( -path '*/base-files/etc/board.d/*' -o -path '*/base-files/etc/init.d/*' -o -path '*/base-files/etc/hotplug.d/*' -o -path '*/base-files/lib/preinit/*' -o -path '*/base-files/lib/upgrade/*.sh' \) | sort)
+mapfile -t airoha_scripts < <(find target/linux/airoha -type f \( -path '*/base-files/etc/board.d/*' -o -path '*/base-files/etc/init.d/*' -o -path '*/base-files/etc/hotplug.d/*' -o -path '*/base-files/etc/uci-defaults/*' -o -path '*/base-files/lib/preinit/*' -o -path '*/base-files/lib/upgrade/*.sh' -o -path '*/base-files/usr/sbin/*' \) | sort)
+custom_scripts=()
+for dir in files package/base-files/files-nnrrwrt; do
+	[ -d "$dir" ] || continue
+	while IFS= read -r script; do
+		custom_scripts+=("$script")
+	done < <(find "$dir" -type f \( -path '*/etc/uci-defaults/*' -o -path '*/etc/board.d/*' -o -path '*/etc/init.d/*' -o -path '*/etc/hotplug.d/*' -o -path '*/usr/sbin/*' \) | sort)
+done
 
 for s in "${bash_scripts[@]}"; do
 	bash -n "$s"
 done
-for s in "${posix_scripts[@]}" "${airoha_scripts[@]}"; do
+for s in "${posix_scripts[@]}" "${airoha_scripts[@]}" "${custom_scripts[@]}"; do
 	sh -n "$s"
 done
 
@@ -36,6 +43,9 @@ if command -v shellcheck >/dev/null 2>&1; then
 	shellcheck -S warning "${bash_scripts[@]}" "${posix_scripts[@]}"
 	if [ "${#airoha_scripts[@]}" -gt 0 ]; then
 		shellcheck -s sh -S error -e SC2148 "${airoha_scripts[@]}"
+	fi
+	if [ "${#custom_scripts[@]}" -gt 0 ]; then
+		shellcheck -s sh -S error -e SC2148 "${custom_scripts[@]}"
 	fi
 else
 	echo "[WARN] shellcheck not installed; skipped shellcheck pass"

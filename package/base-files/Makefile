@@ -186,6 +186,10 @@ define Package/base-files/install
 			$(CP) $(PLATFORM_SUBDIR)/base-files/* $(1)/; \
 		fi; \
 	)
+	$(if $(filter NNRRWrt,$(VERSION_DIST)), \
+		$(INSTALL_DATA) ./files-nnrrwrt/etc/banner $(1)/etc/banner; \
+		$(INSTALL_DIR) $(1)/etc/uci-defaults; \
+		$(INSTALL_DATA) ./files-nnrrwrt/etc/uci-defaults/99-nnrrwrt-defaults $(1)/etc/uci-defaults/99-nnrrwrt-defaults)
 
 	$(VERSION_SED_SCRIPT) \
 		$(1)/etc/banner \

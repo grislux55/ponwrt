@@ -1,0 +1,61 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+
+[ -r /etc/openwrt_release ] || exit 0
+# shellcheck disable=SC1091
+. /etc/openwrt_release
+
+[ "${DISTRIB_ID:-}" = "NNRRWrt" ] || exit 0
+
+fresh_system=0
+cur_hostname="$(uci -q get system.@system[0].hostname || true)"
+case "$cur_hostname" in
+	""|"ponwrt"|"PonWrt"|"ImmortalWrt"|"OpenWrt")
+		uci set system.@system[0].hostname='NNRRWrt'
+		fresh_system=1
+		;;
+esac
+
+cur_zonename="$(uci -q get system.@system[0].zonename || true)"
+cur_timezone="$(uci -q get system.@system[0].timezone || true)"
+case "$cur_zonename:$cur_timezone" in
+	:|UTC:|UTC:GMT0|UTC:UTC|:GMT0|:UTC)
+		uci set system.@system[0].zonename='Asia/Shanghai'
+		uci set system.@system[0].timezone='CST-8'
+		;;
+esac
+
+if [ -f /etc/config/irqbalance ]; then
+	cur_irqb="$(uci -q get irqbalance.irqbalance.enabled || true)"
+	if [ "$fresh_system" -eq 1 ] && [ "${cur_irqb:-0}" = "0" ]; then
+		uci set irqbalance.irqbalance.enabled='1'
+	fi
+fi
+
+if [ -f /etc/config/uhttpd ]; then
+	cur_cn="$(uci -q get uhttpd.defaults.commonname || true)"
+	case "$cur_cn" in
+		""|"%D"|"OpenWrt"|"ImmortalWrt"|"PonWrt")
+			uci set uhttpd.defaults.commonname='NNRRWrt'
+			;;
+	esac
+
+	cur_redir="$(uci -q get uhttpd.main.redirect_https || true)"
+	if [ -z "$cur_redir" ] || [ "$fresh_system" -eq 1 ]; then
+		uci set uhttpd.main.redirect_https='0'
+	fi
+
+	if [ -f /lib/libustream-ssl.so ] && { [ -x /usr/sbin/px5g ] || [ -x /usr/bin/openssl ]; }; then
+		cur_https="$(uci -q get uhttpd.main.listen_https || true)"
+		if [ -z "$cur_https" ] && { [ "$fresh_system" -eq 1 ] || [ ! -s /etc/uhttpd.crt ]; }; then
+			uci add_list uhttpd.main.listen_https='0.0.0.0:443'
+			uci add_list uhttpd.main.listen_https='[::]:443'
+		fi
+	fi
+fi
+
+uci commit system
+[ -f /etc/config/irqbalance ] && uci commit irqbalance
+[ -f /etc/config/uhttpd ] && uci commit uhttpd
+
+exit 0

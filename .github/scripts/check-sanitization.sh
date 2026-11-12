@@ -51,7 +51,7 @@ fi
 
 echo "[3/4] Checking NNRRWrt customized paths for personal paths or private keys..."
 custom_paths=()
-for p in configs .github target/linux/airoha scripts files feeds.conf.default; do
+for p in configs .github target/linux/airoha scripts files package/base-files/files-nnrrwrt feeds.conf.default; do
 	[ -e "$p" ] && custom_paths+=("$p")
 done
 if [ "${#custom_paths[@]}" -gt 0 ]; then
@@ -65,7 +65,7 @@ fi
 
 echo "[4/4] Checking customized files for hardcoded ONT credentials or real identity values..."
 check_dirs=()
-for d in configs target/linux/airoha files; do
+for d in configs target/linux/airoha files package/base-files/files-nnrrwrt; do
 	[ -d "$d" ] && check_dirs+=("$d")
 done
 if [ "${#check_dirs[@]}" -gt 0 ]; then
