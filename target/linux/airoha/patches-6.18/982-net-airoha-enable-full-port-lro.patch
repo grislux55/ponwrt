@@ -1,0 +1,235 @@
+From: grislux55 <jebchou.hg@gmail.com>
+Subject: [PATCH] net: airoha: allow refcounted LRO on shared QDMA ports
+
+Replace the qdma->users > 1 LRO lockout with per-QDMA mutex-protected
+lro_users reference counting and per-netdev lro_enabled state tracking
+so shared QDMA0 ports (eth0/lan1/lan5) can enable NETIF_F_LRO alongside
+exclusive QDMA1 (pon0) without tearing down sibling ports' hardware LRO.
+
+Add lro_shared_qdma module parameter (default 1) and read-only
+/sys/kernel/debug/ppe/lro_state diagnostics.
+
+Signed-off-by: grislux55 <jebchou.hg@gmail.com>
+---
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -24,6 +24,11 @@
+ 
+ static const struct net_device_ops airoha_netdev_ops;
+ 
++static bool lro_shared_qdma = true;
++module_param(lro_shared_qdma, bool, 0644);
++MODULE_PARM_DESC(lro_shared_qdma,
++		 "Allow LRO on QDMA blocks shared by multiple netdevs");
++
+ u32 airoha_rr(void __iomem *base, u32 offset)
+ {
+ 	return readl(base + offset);
+@@ -547,8 +552,19 @@
+ 	int qdma_id = qdma - &eth->qdma[0];
+ 	int i, lro_queue_index = 0;
+ 
++	mutex_lock(&qdma->lro_lock);
++	if (dev->lro_enabled)
++		goto unlock;
++
++	if (!READ_ONCE(lro_shared_qdma) && qdma->users > 1)
++		goto unlock;
++
++	dev->lro_enabled = true;
++	if (qdma->lro_users++)
++		goto unlock;
++
+ 	if (airoha_fe_lro_is_enabled(eth, qdma_id))
+-		return;
++		goto unlock;
+ 
+ 	for (i = 0; i < ARRAY_SIZE(qdma->q_rx); i++) {
+ 		struct airoha_queue *q = &qdma->q_rx[i];
+@@ -566,6 +582,8 @@
+ 					 size);
+ 		lro_queue_index++;
+ 	}
++unlock:
++	mutex_unlock(&qdma->lro_lock);
+ }
+ 
+ static void airoha_dev_lro_disable(struct airoha_gdm_dev *dev)
+@@ -574,10 +592,23 @@
+ 	struct airoha_eth *eth = qdma->eth;
+ 	int qdma_id = qdma - &eth->qdma[0];
+ 
+-	if (!airoha_fe_lro_is_enabled(eth, qdma_id))
+-		return;
++	mutex_lock(&qdma->lro_lock);
++	if (!dev->lro_enabled)
++		goto unlock;
++
++	dev->lro_enabled = false;
++	if (WARN_ON_ONCE(qdma->lro_users <= 0)) {
++		qdma->lro_users = 0;
++		goto disable_hw;
++	}
++	if (--qdma->lro_users)
++		goto unlock;
+ 
+-	airoha_fe_lro_disable(eth, qdma_id);
++disable_hw:
++	if (airoha_fe_lro_is_enabled(eth, qdma_id))
++		airoha_fe_lro_disable(eth, qdma_id);
++unlock:
++	mutex_unlock(&qdma->lro_lock);
+ }
+ 
+ static int airoha_fe_init(struct airoha_eth *eth)
+@@ -1949,6 +1980,7 @@
+ 	const char *res;
+ 
+ 	qdma->eth = eth;
++	mutex_init(&qdma->lro_lock);
+ 	res = devm_kasprintf(eth->dev, GFP_KERNEL, "qdma%d", id);
+ 	if (!res)
+ 		return -ENOMEM;
+@@ -2361,8 +2393,9 @@
+ 	qdma = airoha_qdma_deref(dev);
+ 	qdma_id = qdma - &qdma->eth->qdma[0];
+ 
+-	if (qdma->users > 1 && (airoha_fe_lro_is_enabled(qdma->eth, qdma_id) ||
+-				(netdev->features & NETIF_F_LRO))) {
++	if (!READ_ONCE(lro_shared_qdma) && qdma->users > 1 &&
++	    (airoha_fe_lro_is_enabled(qdma->eth, qdma_id) ||
++	     (netdev->features & NETIF_F_LRO))) {
+ 		netdev_warn(netdev, "required to disable LRO on QDMA%d\n",
+ 			    qdma_id);
+ 		return -EBUSY;
+@@ -2422,8 +2455,7 @@
+ 		if (err) {
+ 			netdev_err(netdev, "failed to queue PON line start: %d\n",
+ 				   err);
+-			if (netdev->features & NETIF_F_LRO)
+-				airoha_dev_lro_disable(dev);
++			airoha_dev_lro_disable(dev);
+ 			if (--port->users)
+ 				airoha_ppe_set_xmit_frame_size(dev);
+ 			else
+@@ -2470,8 +2502,7 @@
+ 					    REG_GDM_FWD_CFG(port->id),
+ 					    FE_PSE_PORT_DROP);
+ 
+-	if (netdev->features & NETIF_F_LRO)
+-		airoha_dev_lro_disable(dev);
++	airoha_dev_lro_disable(dev);
+ 
+ 	if (dev->phylink)
+ 		phylink_disconnect_phy(dev->phylink);
+@@ -2667,7 +2698,7 @@
+ 	}
+ 
+ 	airoha_update_netdev_features(dev);
+-	if (netdev->features & NETIF_F_LRO)
++	if ((netdev->features & NETIF_F_LRO) && netif_running(netdev))
+ 		airoha_dev_lro_enable(dev);
+ }
+ 
+@@ -2818,7 +2849,7 @@
+ 	struct airoha_qdma *qdma;
+ 
+ 	qdma = airoha_qdma_deref(dev);
+-	if (qdma->users > 1)
++	if (!READ_ONCE(lro_shared_qdma) && qdma->users > 1)
+ 		features &= ~NETIF_F_LRO;
+ 
+ 	return features;
+@@ -2829,7 +2860,7 @@
+ {
+ 	struct airoha_gdm_dev *dev = netdev_priv(netdev);
+ 
+-	if (features & NETIF_F_LRO)
++	if ((features & NETIF_F_LRO) && netif_running(netdev))
+ 		airoha_dev_lro_enable(dev);
+ 	else
+ 		airoha_dev_lro_disable(dev);
+--- a/drivers/net/ethernet/airoha/airoha_eth.h
++++ b/drivers/net/ethernet/airoha/airoha_eth.h
+@@ -611,6 +611,8 @@
+ 	void __iomem *regs;
+ 
+ 	int users;
++	struct mutex lro_lock;
++	int lro_users;
+ 
+ 	struct airoha_irq_bank irq_banks[AIROHA_MAX_NUM_IRQ_BANKS];
+ 
+@@ -684,6 +686,7 @@
+ 	} qos_stats[AIROHA_NUM_QOS_CHANNELS];
+ 
+ 	unsigned long flags;
++	bool lro_enabled;
+ 	int nbq;
+ 
+ 	u32 pon_qdma_tag;
+--- a/drivers/net/ethernet/airoha/airoha_ppe_debugfs.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe_debugfs.c
+@@ -222,6 +222,53 @@
+ }
+ DEFINE_SHOW_ATTRIBUTE(airoha_ppe_debugfs_config);
+ 
++static int airoha_ppe_debugfs_lro_state_show(struct seq_file *m,
++					     void *private)
++{
++	struct airoha_ppe *ppe = m->private;
++	struct airoha_eth *eth = ppe->eth;
++	int i, j;
++
++	for (i = 0; i < ARRAY_SIZE(eth->qdma); i++) {
++		struct airoha_qdma *qdma = &eth->qdma[i];
++		u32 en = airoha_fe_get(eth, REG_CDM_LRO_EN(i + 1),
++				       LRO_RXQ_EN_MASK);
++
++		seq_printf(m, "qdma%d: users=%d lro_users=%d cdm_lro_en=0x%x\n",
++			   i, qdma->users, READ_ONCE(qdma->lro_users), en);
++	}
++
++	rcu_read_lock();
++	for (i = 0; i < ARRAY_SIZE(eth->ports); i++) {
++		struct airoha_gdm_port *port = eth->ports[i];
++
++		if (!port)
++			continue;
++		for (j = 0; j < ARRAY_SIZE(port->devs); j++) {
++			struct airoha_gdm_dev *dev = port->devs[j];
++			struct airoha_qdma *qdma;
++			struct net_device *netdev;
++			int qdma_id = -1;
++
++			if (!dev)
++				continue;
++			netdev = netdev_from_priv(dev);
++			qdma = rcu_dereference(dev->qdma);
++			if (qdma)
++				qdma_id = qdma - &eth->qdma[0];
++			seq_printf(m,
++				   "%s: qdma=%d netdev_lro=%u dev_lro=%u\n",
++				   netdev->name, qdma_id,
++				   !!(netdev->features & NETIF_F_LRO),
++				   READ_ONCE(dev->lro_enabled));
++		}
++	}
++	rcu_read_unlock();
++
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(airoha_ppe_debugfs_lro_state);
++
+ static int airoha_ppe_debugfs_bind_rate_show(struct seq_file *m, void *private)
+ {
+ 	struct airoha_ppe *ppe = m->private;
+@@ -353,6 +400,8 @@
+ 			    &airoha_ppe_debugfs_bind_rate_fops);
+ 	debugfs_create_file("pon_pbit_offload", 0644, ppe->debugfs_dir, ppe,
+ 			    &airoha_ppe_debugfs_pon_pbit_fops);
++	debugfs_create_file("lro_state", 0444, ppe->debugfs_dir, ppe,
++			    &airoha_ppe_debugfs_lro_state_fops);
+ 	debugfs_create_file("entries", 0444, ppe->debugfs_dir, ppe,
+ 			    &airoha_ppe_debugfs_foe_all_fops);
+ 	debugfs_create_file("bind", 0444, ppe->debugfs_dir, ppe,

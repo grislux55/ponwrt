@@ -1,0 +1,408 @@
+From: grislux55 <jebchou.hg@gmail.com>
+Subject: [PATCH] net: airoha: tune QDMA ring depths, NAPI budgets, and PPE aging
+
+Tune default QDMA descriptor ring depths for 512 MB AN7581 targets
+(rx_ring_size=2048, lro_rx_ring_size=64, tx_ring_size=2048), increase
+RX/TX NAPI poll weights to 128 without triggering netif_napi_add_weight
+warnings, and align default PPE UDP aging with NF_FLOW_TIMEOUT (30s).
+
+Expose module parameters and runtime /sys/kernel/debug/ppe/{aging,napi_budget}
+controls.
+
+Signed-off-by: grislux55 <jebchou.hg@gmail.com>
+---
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -29,6 +29,29 @@
+ MODULE_PARM_DESC(lro_shared_qdma,
+ 		 "Allow LRO on QDMA blocks shared by multiple netdevs");
+ 
++static unsigned int rx_ring_size = 2048;
++module_param(rx_ring_size, uint, 0444);
++MODULE_PARM_DESC(rx_ring_size,
++		 "QDMA RX queue 0 descriptor ring size (256-4096)");
++
++static unsigned int lro_rx_ring_size = 64;
++module_param(lro_rx_ring_size, uint, 0444);
++MODULE_PARM_DESC(lro_rx_ring_size,
++		 "QDMA LRO RX queue descriptor ring size (32-256)");
++
++static unsigned int tx_ring_size = 2048;
++module_param(tx_ring_size, uint, 0444);
++MODULE_PARM_DESC(tx_ring_size,
++		 "QDMA TX queue descriptor ring size (256-4096)");
++
++static unsigned int rx_napi_weight = 128;
++module_param(rx_napi_weight, uint, 0644);
++MODULE_PARM_DESC(rx_napi_weight, "QDMA RX NAPI poll weight (16-256)");
++
++static unsigned int tx_napi_weight = 128;
++module_param(tx_napi_weight, uint, 0644);
++MODULE_PARM_DESC(tx_napi_weight, "QDMA TX NAPI poll weight (16-256)");
++
+ u32 airoha_rr(void __iomem *base, u32 offset)
+ {
+ 	return readl(base + offset);
+@@ -1240,6 +1263,8 @@
+ 	q->buf_size = lro_q ? pp_params.max_len : pp_params.max_len / 2;
+ 	q->ndesc = ndesc;
+ 	netif_napi_add(eth->napi_dev, &q->napi, airoha_qdma_rx_napi_poll);
++	WRITE_ONCE(q->napi.weight,
++		   clamp_t(unsigned int, READ_ONCE(rx_napi_weight), 16, 256));
+ 
+ 	airoha_qdma_wr(qdma, REG_RX_RING_BASE(qid), dma_addr);
+ 	airoha_qdma_rmw(qdma, REG_RX_RING_SIZE(qid),
+@@ -1306,15 +1331,22 @@
+ 	int i;
+ 
+ 	for (i = 0; i < ARRAY_SIZE(qdma->q_rx); i++) {
+-		int err;
++		int err, ndesc;
+ 
+ 		if (!(RX_DONE_INT_MASK & BIT(i))) {
+ 			/* rx-queue not binded to irq */
+ 			continue;
+ 		}
+ 
+-		err = airoha_qdma_init_rx_queue(&qdma->q_rx[i], qdma,
+-						RX_DSCP_NUM(i));
++		if (i == 0)
++			ndesc = clamp_t(unsigned int, rx_ring_size, 256, 4096);
++		else if (AIROHA_RXQ_LRO_EN_MASK & BIT(i))
++			ndesc = clamp_t(unsigned int, lro_rx_ring_size,
++					32, 256);
++		else
++			ndesc = RX_DSCP_NUM(i);
++
++		err = airoha_qdma_init_rx_queue(&qdma->q_rx[i], qdma, ndesc);
+ 		if (err)
+ 			return err;
+ 	}
+@@ -1582,6 +1614,8 @@
+ 
+ 	netif_napi_add_tx(eth->napi_dev, &irq_q->napi,
+ 			  airoha_qdma_tx_napi_poll);
++	WRITE_ONCE(irq_q->napi.weight,
++		   clamp_t(unsigned int, READ_ONCE(tx_napi_weight), 16, 256));
+ 
+ 	airoha_qdma_wr(qdma, REG_TX_IRQ_BASE(id), dma_addr);
+ 	airoha_qdma_rmw(qdma, REG_TX_IRQ_CFG(id), TX_IRQ_DEPTH_MASK,
+@@ -1594,6 +1628,7 @@
+ 
+ static int airoha_qdma_init_tx(struct airoha_qdma *qdma)
+ {
++	int tx_ndesc = clamp_t(unsigned int, tx_ring_size, 256, 4096);
+ 	int i, err;
+ 
+ 	for (i = 0; i < ARRAY_SIZE(qdma->q_tx_irq); i++) {
+@@ -1605,7 +1640,7 @@
+ 
+ 	for (i = 0; i < ARRAY_SIZE(qdma->q_tx); i++) {
+ 		err = airoha_qdma_init_tx_queue(&qdma->q_tx[i], qdma,
+-						TX_DSCP_NUM);
++						tx_ndesc);
+ 		if (err)
+ 			return err;
+ 	}
+@@ -1613,6 +1648,41 @@
+ 	return 0;
+ }
+ 
++void airoha_eth_get_napi_budget(struct airoha_eth *eth,
++				unsigned int *rx_weight,
++				unsigned int *tx_weight)
++{
++	*rx_weight = clamp_t(unsigned int, READ_ONCE(rx_napi_weight), 16, 256);
++	*tx_weight = clamp_t(unsigned int, READ_ONCE(tx_napi_weight), 16, 256);
++}
++
++void airoha_eth_set_napi_budget(struct airoha_eth *eth,
++				unsigned int rx_weight,
++				unsigned int tx_weight)
++{
++	int i, j;
++
++	rx_weight = clamp_t(unsigned int, rx_weight, 16, 256);
++	tx_weight = clamp_t(unsigned int, tx_weight, 16, 256);
++	WRITE_ONCE(rx_napi_weight, rx_weight);
++	WRITE_ONCE(tx_napi_weight, tx_weight);
++
++	for (i = 0; i < ARRAY_SIZE(eth->qdma); i++) {
++		struct airoha_qdma *qdma = &eth->qdma[i];
++
++		for (j = 0; j < ARRAY_SIZE(qdma->q_rx); j++) {
++			if (qdma->q_rx[j].ndesc)
++				WRITE_ONCE(qdma->q_rx[j].napi.weight,
++					   rx_weight);
++		}
++		for (j = 0; j < ARRAY_SIZE(qdma->q_tx_irq); j++) {
++			if (qdma->q_tx_irq[j].size)
++				WRITE_ONCE(qdma->q_tx_irq[j].napi.weight,
++					   tx_weight);
++		}
++	}
++}
++
+ static void airoha_qdma_tx_cleanup(struct airoha_qdma *qdma)
+ {
+ 	u32 status;
+--- a/drivers/net/ethernet/airoha/airoha_eth.h
++++ b/drivers/net/ethernet/airoha/airoha_eth.h
+@@ -857,6 +857,16 @@
+ extern bool airoha_pon_pbit_ib2_pcp;
+ void airoha_ppe_remove_egress_flows(struct airoha_gdm_dev *dev);
+ void airoha_ppe_flush_pon_flows(struct airoha_eth *eth);
++void airoha_eth_get_napi_budget(struct airoha_eth *eth,
++				unsigned int *rx_weight,
++				unsigned int *tx_weight);
++void airoha_eth_set_napi_budget(struct airoha_eth *eth,
++				unsigned int rx_weight,
++				unsigned int tx_weight);
++void airoha_ppe_get_aging(struct airoha_ppe *ppe, u16 *non_l4, u16 *udp,
++			  u16 *tcp, u16 *tcp_fin);
++void airoha_ppe_set_aging(struct airoha_ppe *ppe, u16 non_l4, u16 udp,
++			  u16 tcp, u16 tcp_fin);
+ bool airoha_ppe_is_enabled(struct airoha_eth *eth, int index);
+ void airoha_ppe_check_skb(struct airoha_ppe_dev *dev, struct sk_buff *skb,
+ 			  u16 hash, bool rx_wlan);
+--- a/drivers/net/ethernet/airoha/airoha_ppe.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe.c
+@@ -33,6 +33,24 @@
+ MODULE_PARM_DESC(pon_pbit_ib2_pcp,
+ 		 "Set IB2_PCP bit in PPE FOE entries when VLAN PCP is non-zero");
+ 
++static unsigned int ppe_age_non_l4 = 60;
++module_param(ppe_age_non_l4, uint, 0644);
++MODULE_PARM_DESC(ppe_age_non_l4,
++		 "PPE non-L4 entry aging delta in seconds");
++
++static unsigned int ppe_age_udp = 30;
++module_param(ppe_age_udp, uint, 0644);
++MODULE_PARM_DESC(ppe_age_udp, "PPE UDP entry aging delta in seconds");
++
++static unsigned int ppe_age_tcp = 60;
++module_param(ppe_age_tcp, uint, 0644);
++MODULE_PARM_DESC(ppe_age_tcp, "PPE TCP entry aging delta in seconds");
++
++static unsigned int ppe_age_tcp_fin = 1;
++module_param(ppe_age_tcp_fin, uint, 0644);
++MODULE_PARM_DESC(ppe_age_tcp_fin,
++		 "PPE TCP FIN entry aging delta in seconds");
++
+ static const struct rhashtable_params airoha_flow_table_params = {
+ 	.head_offset = offsetof(struct airoha_flow_table_entry, node),
+ 	.key_offset = offsetof(struct airoha_flow_table_entry, cookie),
+@@ -146,11 +164,63 @@
+ 		      __field_prep(FP_EGRESS_MTU_MASK(index), len));
+ }
+ 
++static void airoha_ppe_program_aging(struct airoha_eth *eth, int index,
++				     u16 non_l4, u16 udp, u16 tcp, u16 tcp_fin)
++{
++	airoha_fe_rmw(eth, REG_PPE_BND_AGE0(index),
++		      PPE_BIND_AGE0_DELTA_NON_L4 | PPE_BIND_AGE0_DELTA_UDP,
++		      FIELD_PREP(PPE_BIND_AGE0_DELTA_NON_L4, non_l4) |
++		      FIELD_PREP(PPE_BIND_AGE0_DELTA_UDP, udp));
++	airoha_fe_rmw(eth, REG_PPE_BND_AGE1(index),
++		      PPE_BIND_AGE1_DELTA_TCP_FIN | PPE_BIND_AGE1_DELTA_TCP,
++		      FIELD_PREP(PPE_BIND_AGE1_DELTA_TCP_FIN, tcp_fin) |
++		      FIELD_PREP(PPE_BIND_AGE1_DELTA_TCP, tcp));
++}
++
++void airoha_ppe_get_aging(struct airoha_ppe *ppe, u16 *non_l4, u16 *udp,
++			  u16 *tcp, u16 *tcp_fin)
++{
++	struct airoha_eth *eth = ppe->eth;
++	u32 age0 = airoha_fe_rr(eth, REG_PPE_BND_AGE0(0));
++	u32 age1 = airoha_fe_rr(eth, REG_PPE_BND_AGE1(0));
++
++	*non_l4 = FIELD_GET(PPE_BIND_AGE0_DELTA_NON_L4, age0);
++	*udp = FIELD_GET(PPE_BIND_AGE0_DELTA_UDP, age0);
++	*tcp_fin = FIELD_GET(PPE_BIND_AGE1_DELTA_TCP_FIN, age1);
++	*tcp = FIELD_GET(PPE_BIND_AGE1_DELTA_TCP, age1);
++}
++
++void airoha_ppe_set_aging(struct airoha_ppe *ppe, u16 non_l4, u16 udp,
++			  u16 tcp, u16 tcp_fin)
++{
++	struct airoha_eth *eth = ppe->eth;
++	int i;
++
++	non_l4 = clamp_t(u16, non_l4, 1, 0x7fff);
++	udp = clamp_t(u16, udp, 1, 0x7fff);
++	tcp = clamp_t(u16, tcp, 1, 0x7fff);
++	tcp_fin = clamp_t(u16, tcp_fin, 1, 0x7fff);
++
++	WRITE_ONCE(ppe_age_non_l4, non_l4);
++	WRITE_ONCE(ppe_age_udp, udp);
++	WRITE_ONCE(ppe_age_tcp, tcp);
++	WRITE_ONCE(ppe_age_tcp_fin, tcp_fin);
++
++	for (i = 0; i < eth->soc->num_ppe; i++)
++		airoha_ppe_program_aging(eth, i, non_l4, udp, tcp, tcp_fin);
++}
++
+ static void airoha_ppe_hw_init(struct airoha_ppe *ppe)
+ {
+ 	u32 sram_ppe_num_data_entries = PPE_SRAM_NUM_ENTRIES, sram_num_entries;
+ 	u32 sram_tb_size, dram_num_entries;
+ 	struct airoha_eth *eth = ppe->eth;
++	u16 non_l4 = clamp_t(unsigned int, READ_ONCE(ppe_age_non_l4),
++			     1, 0x7fff);
++	u16 udp = clamp_t(unsigned int, READ_ONCE(ppe_age_udp), 1, 0x7fff);
++	u16 tcp = clamp_t(unsigned int, READ_ONCE(ppe_age_tcp), 1, 0x7fff);
++	u16 tcp_fin = clamp_t(unsigned int, READ_ONCE(ppe_age_tcp_fin),
++			      1, 0x7fff);
+ 	int i, sram_num_stats_entries;
+ 
+ 	sram_num_entries = airoha_ppe_get_total_sram_num_entries(ppe);
+@@ -167,16 +237,7 @@
+ 		airoha_fe_wr(eth, REG_PPE_TB_BASE(i),
+ 			     ppe->foe_dma + sram_tb_size);
+ 
+-		airoha_fe_rmw(eth, REG_PPE_BND_AGE0(i),
+-			      PPE_BIND_AGE0_DELTA_NON_L4 |
+-			      PPE_BIND_AGE0_DELTA_UDP,
+-			      FIELD_PREP(PPE_BIND_AGE0_DELTA_NON_L4, 60) |
+-			      FIELD_PREP(PPE_BIND_AGE0_DELTA_UDP, 60));
+-		airoha_fe_rmw(eth, REG_PPE_BND_AGE1(i),
+-			      PPE_BIND_AGE1_DELTA_TCP_FIN |
+-			      PPE_BIND_AGE1_DELTA_TCP,
+-			      FIELD_PREP(PPE_BIND_AGE1_DELTA_TCP_FIN, 1) |
+-			      FIELD_PREP(PPE_BIND_AGE1_DELTA_TCP, 60));
++		airoha_ppe_program_aging(eth, i, non_l4, udp, tcp, tcp_fin);
+ 
+ 		airoha_fe_rmw(eth, REG_PPE_TB_HASH_CFG(i),
+ 			      PPE_SRAM_TABLE_EN_MASK |
+--- a/drivers/net/ethernet/airoha/airoha_ppe_debugfs.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe_debugfs.c
+@@ -373,6 +373,118 @@
+ 	return count;
+ }
+ 
++static int airoha_ppe_debugfs_aging_show(struct seq_file *m, void *private)
++{
++	struct airoha_ppe *ppe = m->private;
++	u16 non_l4, udp, tcp, tcp_fin;
++
++	airoha_ppe_get_aging(ppe, &non_l4, &udp, &tcp, &tcp_fin);
++	seq_printf(m, "non_l4=%u udp=%u tcp=%u tcp_fin=%u\n",
++		   non_l4, udp, tcp, tcp_fin);
++
++	return 0;
++}
++
++static int airoha_ppe_debugfs_aging_open(struct inode *inode,
++					 struct file *file)
++{
++	return single_open(file, airoha_ppe_debugfs_aging_show,
++			   inode->i_private);
++}
++
++static ssize_t airoha_ppe_debugfs_aging_write(struct file *file,
++					      const char __user *user_buf,
++					      size_t count, loff_t *ppos)
++{
++	struct seq_file *m = file->private_data;
++	struct airoha_ppe *ppe = m->private;
++	unsigned int non_l4, udp, tcp, tcp_fin;
++	char buf[64];
++
++	if (count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, user_buf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	if (sscanf(buf, "%u %u %u %u", &non_l4, &udp, &tcp, &tcp_fin) != 4)
++		return -EINVAL;
++	if (!non_l4 || non_l4 > 0x7fff || !udp || udp > 0x7fff ||
++	    !tcp || tcp > 0x7fff || !tcp_fin || tcp_fin > 0x7fff)
++		return -ERANGE;
++
++	airoha_ppe_set_aging(ppe, non_l4, udp, tcp, tcp_fin);
++
++	return count;
++}
++
++static const struct file_operations airoha_ppe_debugfs_aging_fops = {
++	.owner = THIS_MODULE,
++	.open = airoha_ppe_debugfs_aging_open,
++	.read = seq_read,
++	.llseek = seq_lseek,
++	.release = single_release,
++	.write = airoha_ppe_debugfs_aging_write,
++};
++
++static int airoha_ppe_debugfs_napi_budget_show(struct seq_file *m,
++					       void *private)
++{
++	struct airoha_ppe *ppe = m->private;
++	unsigned int rx_weight, tx_weight;
++
++	airoha_eth_get_napi_budget(ppe->eth, &rx_weight, &tx_weight);
++	seq_printf(m, "rx=%u tx=%u\n", rx_weight, tx_weight);
++
++	return 0;
++}
++
++static int airoha_ppe_debugfs_napi_budget_open(struct inode *inode,
++					       struct file *file)
++{
++	return single_open(file, airoha_ppe_debugfs_napi_budget_show,
++			   inode->i_private);
++}
++
++static ssize_t airoha_ppe_debugfs_napi_budget_write(struct file *file,
++						    const char __user *user_buf,
++						    size_t count, loff_t *ppos)
++{
++	struct seq_file *m = file->private_data;
++	struct airoha_ppe *ppe = m->private;
++	unsigned int rx_weight, tx_weight;
++	char buf[32];
++	int ret;
++
++	if (count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, user_buf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	ret = sscanf(buf, "%u %u", &rx_weight, &tx_weight);
++	if (ret == 1)
++		tx_weight = rx_weight;
++	else if (ret != 2)
++		return -EINVAL;
++	if (rx_weight < 16 || rx_weight > 256 ||
++	    tx_weight < 16 || tx_weight > 256)
++		return -ERANGE;
++
++	airoha_eth_set_napi_budget(ppe->eth, rx_weight, tx_weight);
++
++	return count;
++}
++
++static const struct file_operations airoha_ppe_debugfs_napi_budget_fops = {
++	.owner = THIS_MODULE,
++	.open = airoha_ppe_debugfs_napi_budget_open,
++	.read = seq_read,
++	.llseek = seq_lseek,
++	.release = single_release,
++	.write = airoha_ppe_debugfs_napi_budget_write,
++};
++
+ static const struct file_operations airoha_ppe_debugfs_pon_pbit_fops = {
+ 	.owner = THIS_MODULE,
+ 	.open = airoha_ppe_debugfs_pon_pbit_open,
+@@ -402,6 +514,10 @@
+ 			    &airoha_ppe_debugfs_pon_pbit_fops);
+ 	debugfs_create_file("lro_state", 0444, ppe->debugfs_dir, ppe,
+ 			    &airoha_ppe_debugfs_lro_state_fops);
++	debugfs_create_file("aging", 0644, ppe->debugfs_dir, ppe,
++			    &airoha_ppe_debugfs_aging_fops);
++	debugfs_create_file("napi_budget", 0644, ppe->debugfs_dir, ppe,
++			    &airoha_ppe_debugfs_napi_budget_fops);
+ 	debugfs_create_file("entries", 0444, ppe->debugfs_dir, ppe,
+ 			    &airoha_ppe_debugfs_foe_all_fops);
+ 	debugfs_create_file("bind", 0444, ppe->debugfs_dir, ppe,

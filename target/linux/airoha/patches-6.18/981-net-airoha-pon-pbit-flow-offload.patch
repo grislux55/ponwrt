@@ -1,0 +1,367 @@
+From: grislux55 <jebchou.hg@gmail.com>
+Subject: [PATCH] net: airoha: propagate VLAN egress PCP for PON PPE flow offload
+
+Propagate the Linux VLAN netdevice ifindex through nf_flow_table
+routes without altering flow_offload_tuple's hash key region, resolve
+the egress 802.1p PCP via vlan_dev_get_egress_qos_mask() during
+FLOW_ACTION_VLAN_PUSH generation, and use the resulting P-bit in
+airoha_ppe_pon_select_flow() and FOE L2 VLAN tags.
+
+Add runtime/module switches pon_pbit_offload (default 1) and
+pon_pbit_ib2_pcp (default 0), plus /sys/kernel/debug/ppe/pon_pbit_offload
+which flushes existing PON PPE flows on update.
+
+Signed-off-by: grislux55 <jebchou.hg@gmail.com>
+---
+--- a/drivers/net/ethernet/airoha/airoha_eth.h
++++ b/drivers/net/ethernet/airoha/airoha_eth.h
+@@ -535,6 +535,7 @@
+ 		struct {
+ 			u16 id;
+ 			__be16 proto;
++			u8 prio;
+ 		} hdr[2];
+ 		u8 num;
+ 	} vlan;
+@@ -849,7 +850,10 @@
+ 
+ void airoha_ppe_set_xmit_frame_size(struct airoha_gdm_dev *dev);
+ void airoha_ppe_set_cpu_port(struct airoha_gdm_dev *dev, u8 ppe_id, u8 fport);
++extern bool airoha_pon_pbit_offload;
++extern bool airoha_pon_pbit_ib2_pcp;
+ void airoha_ppe_remove_egress_flows(struct airoha_gdm_dev *dev);
++void airoha_ppe_flush_pon_flows(struct airoha_eth *eth);
+ bool airoha_ppe_is_enabled(struct airoha_eth *eth, int index);
+ void airoha_ppe_check_skb(struct airoha_ppe_dev *dev, struct sk_buff *skb,
+ 			  u16 hash, bool rx_wlan);
+--- a/drivers/net/ethernet/airoha/airoha_ppe.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe.c
+@@ -23,6 +23,16 @@
+ DEFINE_MUTEX(flow_offload_mutex);
+ static DEFINE_SPINLOCK(ppe_lock);
+ 
++bool airoha_pon_pbit_offload = true;
++module_param_named(pon_pbit_offload, airoha_pon_pbit_offload, bool, 0644);
++MODULE_PARM_DESC(pon_pbit_offload,
++		 "Use VLAN egress PCP to select PON GEM/T-CONT in PPE offload");
++
++bool airoha_pon_pbit_ib2_pcp;
++module_param_named(pon_pbit_ib2_pcp, airoha_pon_pbit_ib2_pcp, bool, 0644);
++MODULE_PARM_DESC(pon_pbit_ib2_pcp,
++		 "Set IB2_PCP bit in PPE FOE entries when VLAN PCP is non-zero");
++
+ static const struct rhashtable_params airoha_flow_table_params = {
+ 	.head_offset = offsetof(struct airoha_flow_table_entry, node),
+ 	.key_offset = offsetof(struct airoha_flow_table_entry, cookie),
+@@ -393,7 +403,8 @@
+ 	 * use VID_ANY and P-bit 0, matching ndo_start_xmit classification.
+ 	 */
+ 	vlan_id = data->vlan.num ?
+-		data->vlan.hdr[data->vlan.num - 1].id : AIROHA_PON_VID_ANY;
++		data->vlan.hdr[data->vlan.num - 1].id & VLAN_VID_MASK :
++		AIROHA_PON_VID_ANY;
+ 	if (!data->vlan.num) {
+ 		tag = airoha_ppe_pon_lookup_tag(table, vlan_id, 0);
+ 		if (!(tag & AIROHA_PON_QDMA_VALID))
+@@ -402,9 +413,20 @@
+ 		return 0;
+ 	}
+ 
+-	/* nf_flow_table VLAN actions provide VID while dynamic PCP remains in skb.
+-	 * Offload is valid when all eight P-bits resolve to one GEM/T-CONT;
+-	 * split mappings retain per-packet classification on the software path.
++	if (READ_ONCE(airoha_pon_pbit_offload)) {
++		pbit = data->vlan.hdr[data->vlan.num - 1].prio & 0x7;
++		tag = airoha_ppe_pon_lookup_tag(table, vlan_id, pbit);
++		if (!(tag & AIROHA_PON_QDMA_VALID))
++			return -EOPNOTSUPP;
++		*pon_tag = tag & (AIROHA_PON_QDMA_VALID |
++				  AIROHA_PON_QDMA_EPON |
++				  AIROHA_PON_QDMA_TCONT_MASK |
++				  AIROHA_PON_QDMA_GEM_MASK);
++		return 0;
++	}
++
++	/* Fallback mode: require all eight P-bits to resolve to one GEM/T-CONT
++	 * when per-flow P-bit offload is disabled.
+ 	 */
+ 	for (pbit = 0; pbit < 8; pbit++) {
+ 		tag = airoha_ppe_pon_lookup_tag(table, vlan_id, pbit);
+@@ -526,6 +548,11 @@
+ 	if (is_multicast_ether_addr(data->eth.h_dest))
+ 		val |= AIROHA_FOE_IB2_MULTICAST;
+ 
++	if (READ_ONCE(airoha_pon_pbit_ib2_pcp) && data->vlan.num &&
++	    ((data->vlan.hdr[0].prio & 0x7) ||
++	     (data->vlan.num == 2 && (data->vlan.hdr[1].prio & 0x7))))
++		val |= AIROHA_FOE_IB2_PCP;
++
+ 	ports_pad = 0xa5a5a500 | (l4proto & 0xff);
+ 	if (type == PPE_PKT_TYPE_IPV4_ROUTE)
+ 		hwe->ipv4.orig_tuple.ports = ports_pad;
+@@ -568,8 +595,17 @@
+ 
+ 	if (data->vlan.num) {
+ 		l2->vlan1 = data->vlan.hdr[0].id;
+-		if (data->vlan.num == 2)
++		if (data->vlan.hdr[0].prio & 0x7)
++			l2->vlan1 = (l2->vlan1 & VLAN_VID_MASK) |
++				    ((u16)(data->vlan.hdr[0].prio & 0x7) <<
++				     VLAN_PRIO_SHIFT);
++		if (data->vlan.num == 2) {
+ 			l2->vlan2 = data->vlan.hdr[1].id;
++			if (data->vlan.hdr[1].prio & 0x7)
++				l2->vlan2 = (l2->vlan2 & VLAN_VID_MASK) |
++					    ((u16)(data->vlan.hdr[1].prio & 0x7) <<
++					     VLAN_PRIO_SHIFT);
++		}
+ 	}
+ 
+ 	if (wlan_etype >= 0) {
+@@ -1004,6 +1040,26 @@
+ 	}
+ }
+ 
++void airoha_ppe_flush_pon_flows(struct airoha_eth *eth)
++{
++	int i, j;
++
++	mutex_lock(&flow_offload_mutex);
++	for (i = 0; i < ARRAY_SIZE(eth->ports); i++) {
++		struct airoha_gdm_port *port = eth->ports[i];
++
++		if (!port)
++			continue;
++		for (j = 0; j < ARRAY_SIZE(port->devs); j++) {
++			struct airoha_gdm_dev *dev = port->devs[j];
++
++			if (dev && test_bit(AIROHA_DEV_F_PON, &dev->flags))
++				airoha_ppe_remove_egress_flows(dev);
++		}
++	}
++	mutex_unlock(&flow_offload_mutex);
++}
++
+ static int
+ airoha_ppe_foe_commit_subflow_entry(struct airoha_ppe *ppe,
+ 				    struct airoha_flow_table_entry *e,
+@@ -1350,6 +1406,7 @@
+ 
+ 			data.vlan.hdr[data.vlan.num].id = act->vlan.vid;
+ 			data.vlan.hdr[data.vlan.num].proto = act->vlan.proto;
++			data.vlan.hdr[data.vlan.num].prio = act->vlan.prio & 0x7;
+ 			data.vlan.num++;
+ 			break;
+ 		case FLOW_ACTION_VLAN_POP:
+--- a/drivers/net/ethernet/airoha/airoha_ppe_debugfs.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe_debugfs.c
+@@ -279,6 +279,62 @@
+ 	return count;
+ }
+ 
++static int airoha_ppe_debugfs_pon_pbit_show(struct seq_file *m, void *private)
++{
++	seq_printf(m, "%u %u\n",
++		   READ_ONCE(airoha_pon_pbit_offload),
++		   READ_ONCE(airoha_pon_pbit_ib2_pcp));
++
++	return 0;
++}
++
++static int airoha_ppe_debugfs_pon_pbit_open(struct inode *inode,
++					    struct file *file)
++{
++	return single_open(file, airoha_ppe_debugfs_pon_pbit_show,
++			   inode->i_private);
++}
++
++static ssize_t airoha_ppe_debugfs_pon_pbit_write(struct file *file,
++						 const char __user *user_buf,
++						 size_t count, loff_t *ppos)
++{
++	struct seq_file *m = file->private_data;
++	struct airoha_ppe *ppe = m->private;
++	unsigned int offload, ib2_pcp;
++	char buf[32];
++	int ret;
++
++	if (count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, user_buf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	ret = sscanf(buf, "%u %u", &offload, &ib2_pcp);
++	if (ret == 1)
++		ib2_pcp = READ_ONCE(airoha_pon_pbit_ib2_pcp);
++	else if (ret != 2)
++		return -EINVAL;
++	if (offload > 1 || ib2_pcp > 1)
++		return -ERANGE;
++
++	WRITE_ONCE(airoha_pon_pbit_offload, !!offload);
++	WRITE_ONCE(airoha_pon_pbit_ib2_pcp, !!ib2_pcp);
++	airoha_ppe_flush_pon_flows(ppe->eth);
++
++	return count;
++}
++
++static const struct file_operations airoha_ppe_debugfs_pon_pbit_fops = {
++	.owner = THIS_MODULE,
++	.open = airoha_ppe_debugfs_pon_pbit_open,
++	.read = seq_read,
++	.llseek = seq_lseek,
++	.release = single_release,
++	.write = airoha_ppe_debugfs_pon_pbit_write,
++};
++
+ static const struct file_operations airoha_ppe_debugfs_bind_rate_fops = {
+ 	.owner = THIS_MODULE,
+ 	.open = airoha_ppe_debugfs_bind_rate_open,
+@@ -295,6 +351,8 @@
+ 			    &airoha_ppe_debugfs_config_fops);
+ 	debugfs_create_file("bind_rate", 0644, ppe->debugfs_dir, ppe,
+ 			    &airoha_ppe_debugfs_bind_rate_fops);
++	debugfs_create_file("pon_pbit_offload", 0644, ppe->debugfs_dir, ppe,
++			    &airoha_ppe_debugfs_pon_pbit_fops);
+ 	debugfs_create_file("entries", 0444, ppe->debugfs_dir, ppe,
+ 			    &airoha_ppe_debugfs_foe_all_fops);
+ 	debugfs_create_file("bind", 0444, ppe->debugfs_dir, ppe,
+--- a/include/net/netfilter/nf_flow_table.h
++++ b/include/net/netfilter/nf_flow_table.h
+@@ -145,6 +145,7 @@
+ 					in_vlan_ingress:2;
+ 	u16				mtu;
+ 	u8				dscp;
++	u32				encap_ifindex[NF_FLOW_TABLE_ENCAP_MAX];
+ 	union {
+ 		struct {
+ 			struct dst_entry *dst_cache;
+@@ -214,6 +215,7 @@
+ 			struct {
+ 				u16		id;
+ 				__be16		proto;
++				u32		ifindex;
+ 			} encap[NF_FLOW_TABLE_ENCAP_MAX];
+ 			u8			num_encaps:2,
+ 						ingress_vlans:2;
+--- a/net/netfilter/nf_flow_table_core.c
++++ b/net/netfilter/nf_flow_table_core.c
+@@ -114,6 +114,7 @@
+ 	for (i = route->tuple[dir].in.num_encaps - 1; i >= 0; i--) {
+ 		flow_tuple->encap[j].id = route->tuple[dir].in.encap[i].id;
+ 		flow_tuple->encap[j].proto = route->tuple[dir].in.encap[i].proto;
++		flow_tuple->encap_ifindex[j] = route->tuple[dir].in.encap[i].ifindex;
+ 		if (route->tuple[dir].in.ingress_vlans & BIT(i))
+ 			flow_tuple->in_vlan_ingress |= BIT(j);
+ 		j++;
+--- a/net/netfilter/nf_flow_table_offload.c
++++ b/net/netfilter/nf_flow_table_offload.c
+@@ -4,8 +4,11 @@
+ #include <linux/netfilter.h>
+ #include <linux/rhashtable.h>
+ #include <linux/netdevice.h>
++#include <linux/if_vlan.h>
+ #include <linux/tc_act/tc_csum.h>
+ #include <net/flow_offload.h>
++#include <net/inet_dscp.h>
++#include <net/route.h>
+ #include <net/netfilter/nf_flow_table.h>
+ #include <net/netfilter/nf_tables.h>
+ #include <net/netfilter/nf_conntrack.h>
+@@ -748,12 +751,35 @@
+ 			entry->id = FLOW_ACTION_PPPOE_PUSH;
+ 			entry->pppoe.sid = other_tuple->encap[i].id;
+ 			break;
+-		case htons(ETH_P_8021Q):
++		case htons(ETH_P_8021Q): {
++			struct net_device *vdev;
++			u32 skprio = 0;
++
+ 			entry->id = FLOW_ACTION_VLAN_PUSH;
+ 			entry->vlan.vid = other_tuple->encap[i].id;
+ 			entry->vlan.proto = other_tuple->encap[i].proto;
++			entry->vlan.prio = 0;
++			if (!other_tuple->encap_ifindex[i])
++				break;
++
++			if (flow->priority)
++				skprio = flow->priority;
++			else if (tuple->l3proto == NFPROTO_IPV4 &&
++				 READ_ONCE(net->ipv4.sysctl_ip_fwd_update_priority))
++				skprio = rt_tos2priority(FIELD_PREP(INET_DSCP_MASK,
++								    tuple->dscp));
++
++			rcu_read_lock();
++			vdev = dev_get_by_index_rcu(net,
++						    other_tuple->encap_ifindex[i]);
++			if (vdev && is_vlan_dev(vdev))
++				entry->vlan.prio =
++					(vlan_dev_get_egress_qos_mask(vdev, skprio) &
++					 VLAN_PRIO_MASK) >> VLAN_PRIO_SHIFT;
++			rcu_read_unlock();
+ 			break;
+ 		}
++		}
+ 	}
+ 
+ 	return 0;
+--- a/net/netfilter/nf_flow_table_path.c
++++ b/net/netfilter/nf_flow_table_path.c
+@@ -90,6 +90,7 @@
+ 	struct id {
+ 		__u16	id;
+ 		__be16	proto;
++		u32	ifindex;
+ 	} encap[NF_FLOW_TABLE_ENCAP_MAX];
+ 	u8 num_encaps;
+ 	u8 ingress_vlans;
+@@ -143,6 +144,8 @@
+ 				info->outdev = path->dev;
+ 			info->encap[info->num_encaps].id = path->encap.id;
+ 			info->encap[info->num_encaps].proto = path->encap.proto;
++			info->encap[info->num_encaps].ifindex =
++				path->type == DEV_PATH_VLAN ? path->dev->ifindex : 0;
+ 			info->num_encaps++;
+ 			if (info->bridge_path)
+ 				info->port_vlans++;
+@@ -168,6 +171,7 @@
+ 				info->ingress_vlans |= BIT(info->num_encaps);
+ 				info->encap[info->num_encaps].id = path->bridge.vlan_id;
+ 				info->encap[info->num_encaps].proto = path->bridge.vlan_proto;
++				info->encap[info->num_encaps].ifindex = 0;
+ 				info->num_encaps++;
+ 				break;
+ 			case DEV_PATH_BR_VLAN_TAG:
+@@ -176,6 +180,7 @@
+ 
+ 				info->encap[info->num_encaps].id = path->bridge.vlan_id;
+ 				info->encap[info->num_encaps].proto = path->bridge.vlan_proto;
++				info->encap[info->num_encaps].ifindex = 0;
+ 				info->num_encaps++;
+ 				break;
+ 			case DEV_PATH_BR_VLAN_UNTAG:
+@@ -255,6 +260,7 @@
+ 	for (i = 0; i < info.num_encaps; i++) {
+ 		route->tuple[!dir].in.encap[i].id = info.encap[i].id;
+ 		route->tuple[!dir].in.encap[i].proto = info.encap[i].proto;
++		route->tuple[!dir].in.encap[i].ifindex = info.encap[i].ifindex;
+ 	}
+ 	route->tuple[!dir].in.num_encaps = info.num_encaps;
+ 	route->tuple[!dir].in.ingress_vlans = info.ingress_vlans;
+@@ -354,6 +360,7 @@
+ 
+ 		info.encap[info.num_encaps].id = th[dir].tuple.encap[i].id;
+ 		info.encap[info.num_encaps].proto = th[dir].tuple.encap[i].proto;
++		info.encap[info.num_encaps].ifindex = th[dir].tuple.encap_ifindex[i];
+ 		info.num_encaps++;
+ 
+ 		if (th[dir].tuple.encap[i].proto == htons(ETH_P_PPP_SES))
+@@ -380,6 +387,7 @@
+ 	for (i = info.num_encaps - 1; i >= 0; i--) {
+ 		th[!dir].tuple.encap[j].id = info.encap[i].id;
+ 		th[!dir].tuple.encap[j].proto = info.encap[i].proto;
++		th[!dir].tuple.encap_ifindex[j] = info.encap[i].ifindex;
+ 		if (info.ingress_vlans & BIT(i))
+ 			th[!dir].tuple.in_vlan_ingress |= BIT(j);
+ 		j++;
