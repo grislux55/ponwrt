@@ -1,0 +1,55 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-only
+
+# shellcheck disable=SC2034
+START=98
+# shellcheck disable=SC2034
+USE_PROCD=1
+
+PPE_BIND_RATE_PATH="/sys/kernel/debug/ppe/bind_rate"
+DEFAULT_UPSTREAM_RATE="30"
+
+is_valid_rate() {
+	case "$1" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	[ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+apply_ppe_bind_rate() {
+
+	[ -w "$PPE_BIND_RATE_PATH" ] || return 0
+
+	config_load airoha_accel
+	ppe_enabled=0
+	ppe_l2b=10
+	ppe_l3=10
+	config_get_bool ppe_enabled ppe enabled 0
+	config_get ppe_l2b ppe bind_rate_l2b 10
+	config_get ppe_l3 ppe bind_rate_l3 10
+
+	if [ "$ppe_enabled" -eq 1 ]; then
+		is_valid_rate "$ppe_l2b" || ppe_l2b=10
+		is_valid_rate "$ppe_l3" || ppe_l3=10
+		printf '%s %s\n' "$ppe_l2b" "$ppe_l3" > "$PPE_BIND_RATE_PATH"
+	else
+		printf '%s %s\n' "$DEFAULT_UPSTREAM_RATE" "$DEFAULT_UPSTREAM_RATE" > "$PPE_BIND_RATE_PATH"
+	fi
+}
+
+start_service() {
+	apply_ppe_bind_rate
+}
+
+reload_service() {
+	apply_ppe_bind_rate
+}
+
+stop_service() {
+	[ -w "$PPE_BIND_RATE_PATH" ] || return 0
+	printf '%s %s\n' "$DEFAULT_UPSTREAM_RATE" "$DEFAULT_UPSTREAM_RATE" > "$PPE_BIND_RATE_PATH"
+}
+
+service_triggers() {
+	procd_add_reload_trigger "airoha_accel"
+}

@@ -1,0 +1,4 @@
+config airoha_accel 'ppe'
+	option enabled '0'
+	option bind_rate_l2b '10'
+	option bind_rate_l3 '10'

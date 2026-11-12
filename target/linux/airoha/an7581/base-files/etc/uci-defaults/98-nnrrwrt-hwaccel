@@ -1,0 +1,32 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+
+DISTRIB_ID=""
+if [ -r /etc/openwrt_release ]; then
+	# shellcheck disable=SC1091
+	. /etc/openwrt_release
+fi
+[ "$DISTRIB_ID" = "NNRRWrt" ] || exit 0
+
+if [ -f /etc/config/airoha_accel ]; then
+	init_done="$(uci -q get airoha_accel.ppe.nnrrwrt_init)"
+	if [ "$init_done" != "1" ]; then
+		uci -q set airoha_accel.ppe.enabled='1'
+		uci -q set airoha_accel.ppe.bind_rate_l2b='10'
+		uci -q set airoha_accel.ppe.bind_rate_l3='10'
+		uci -q set airoha_accel.ppe.nnrrwrt_init='1'
+		uci -q commit airoha_accel
+	fi
+fi
+
+if uci -q get network.@globals[0] >/dev/null 2>&1; then
+	if [ -z "$(uci -q get network.@globals[0].packet_steering)" ]; then
+		uci -q set network.@globals[0].packet_steering='1'
+	fi
+	if [ -z "$(uci -q get network.@globals[0].steering_flows)" ]; then
+		uci -q set network.@globals[0].steering_flows='256'
+	fi
+	uci -q commit network
+fi
+
+exit 0

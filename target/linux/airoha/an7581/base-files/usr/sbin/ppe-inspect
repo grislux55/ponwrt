@@ -1,0 +1,89 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+
+PPE_DIR="/sys/kernel/debug/ppe"
+SHOW_RAW=0
+
+if [ "${1:-}" = "--raw" ]; then
+	SHOW_RAW=1
+fi
+
+echo "=== NNRRWrt AN7581 Acceleration & PPE Inspection ==="
+
+echo "[1] PPE Configuration & Bind Rate"
+if [ -r "$PPE_DIR/bind_rate" ]; then
+	cat "$PPE_DIR/bind_rate"
+else
+	echo "bind_rate: unavailable ($PPE_DIR/bind_rate not readable)"
+fi
+if [ -r "$PPE_DIR/config" ]; then
+	cat "$PPE_DIR/config"
+else
+	echo "config: unavailable"
+fi
+
+echo "[2] PPE Entries Summary"
+if [ -r "$PPE_DIR/entries" ]; then
+	awk '
+		BEGIN { total=0; bind=0; unbind=0; fin=0; l2b=0; ipv4=0; ipv6=0; }
+		NF > 0 {
+			total++;
+			if ($0 ~ /(^|[[:space:]])(BND|BIND)([[:space:]]|$)/) bind++;
+			else if ($0 ~ /(^|[[:space:]])(UNB|UNBIND)([[:space:]]|$)/) unbind++;
+			else if ($0 ~ /(^|[[:space:]])FIN([[:space:]]|$)/) fin++;
+			if ($0 ~ /L2B/) l2b++;
+			if ($0 ~ /IPv4|IPV4/) ipv4++;
+			if ($0 ~ /IPv6|IPV6/) ipv6++;
+		}
+		END {
+			printf("total=%d bind=%d unbind=%d fin=%d l2b=%d ipv4=%d ipv6=%d\n",
+				total, bind, unbind, fin, l2b, ipv4, ipv6);
+		}
+	' "$PPE_DIR/entries"
+	if [ "$SHOW_RAW" -eq 1 ]; then
+		cat "$PPE_DIR/entries"
+	fi
+else
+	echo "entries: unavailable"
+fi
+
+echo "[3] Packet Steering (RPS/RFS/XPS)"
+if command -v uci >/dev/null 2>&1; then
+	echo "packet_steering=$(uci -q get network.@globals[0].packet_steering || echo unset) steering_flows=$(uci -q get network.@globals[0].steering_flows || echo unset)"
+fi
+if [ -r /proc/sys/net/core/rps_sock_flow_entries ]; then
+	echo "rps_sock_flow_entries=$(cat /proc/sys/net/core/rps_sock_flow_entries)"
+fi
+for qpath in /sys/class/net/pon0/queues/rx-* /sys/class/net/lan*/queues/rx-*; do
+	[ -d "$qpath" ] || continue
+	devname="$(basename "$(dirname "$(dirname "$qpath")")")"
+	qname="$(basename "$qpath")"
+	rps_cpus="$(cat "$qpath/rps_cpus" 2>/dev/null || echo -)"
+	rps_flow_cnt="$(cat "$qpath/rps_flow_cnt" 2>/dev/null || echo -)"
+	printf "  %s/%s: rps_cpus=%s rps_flow_cnt=%s\n" "$devname" "$qname" "$rps_cpus" "$rps_flow_cnt"
+done
+
+echo "[4] Crypto Hardware & CPU Features"
+if [ -r /proc/cpuinfo ]; then
+	grep -m1 '^Features' /proc/cpuinfo || true
+fi
+[ -c /dev/crypto ] && echo "/dev/crypto: present" || echo "/dev/crypto: absent"
+if command -v uci >/dev/null 2>&1; then
+	echo "openssl.devcrypto.enabled=$(uci -q get openssl.devcrypto.enabled || echo unset)"
+fi
+if [ -r /proc/crypto ]; then
+	awk '
+		/^name[[:space:]]*:/ { name=$3 }
+		/^driver[[:space:]]*:/ { drv=$3 }
+		/^priority[[:space:]]*:/ {
+			prio=$3;
+			if (drv ~ /eip93|neon|arm64|ce|aes|chacha|poly1305/)
+				printf("  %-24s driver=%-24s priority=%s\n", name, drv, prio);
+		}
+	' /proc/crypto
+fi
+
+echo "[5] Relevant Interrupts"
+if [ -r /proc/interrupts ]; then
+	grep -E 'CPU|fe_main|qdma|eip93|eth|pon|xhci' /proc/interrupts || true
+fi
