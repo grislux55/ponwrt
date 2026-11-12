@@ -280,7 +280,7 @@
 	phy-mode = "2500base-x";
 
 	nvmem-cell-names = "mac-address";
-	nvmem-cells = <&macaddr_factory_3e (0)>;
+	nvmem-cells = <&macaddr_factory_3e 2>;
 };
 
 &usb0 {
