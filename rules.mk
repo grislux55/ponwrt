@@ -424,9 +424,16 @@ ifneq ($(CONFIG_CCACHE),)
   TARGET_CXX:= ccache $(TARGET_CXX)
   HOSTCC:= ccache $(HOSTCC)
   HOSTCXX:= ccache $(HOSTCXX)
-  export CCACHE_NOCOMPRESS:=true
+  ifneq ($(filter 1 true,$(CCACHE_COMPRESS)),)
+    export CCACHE_COMPRESS
+  else
+    export CCACHE_NOCOMPRESS?=true
+  endif
   export CCACHE_BASEDIR:=$(TOPDIR)
   export CCACHE_DIR:=$(if $(call qstrip,$(CONFIG_CCACHE_DIR)),$(call qstrip,$(CONFIG_CCACHE_DIR)),$(TOPDIR)/.ccache)
+  export CCACHE_COMPILERCHECK?=content
+  export CCACHE_SLOPPINESS?=time_macros,locale
+  export CCACHE_MAXSIZE?=2G
 endif
 
 TARGET_CONFIGURE_OPTS = \

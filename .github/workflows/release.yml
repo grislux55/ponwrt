@@ -142,7 +142,11 @@ jobs:
 
       - name: Free build space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo -v
+          sudo rm -rf /usr/share/dotnet &
+          sudo rm -rf /usr/local/lib/android &
+          sudo rm -rf /opt/ghc &
+          wait
           sudo apt-get clean
 
       - name: Install build dependencies
@@ -160,14 +164,6 @@ jobs:
             python3 python3-docutils python3-pip python3-ply python3-pyelftools \
             qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo \
             uglifyjs unzip wget xmlto xxd zlib1g-dev zstd
-
-      - name: Cache downloads
-        uses: actions/cache@v4
-        with:
-          path: dl
-          key: ponwrt-dl-${{ matrix.target }}-${{ hashFiles('feeds.conf.default', 'configs/*.config') }}
-          restore-keys: |
-            ponwrt-dl-${{ matrix.target }}-
 
       - name: Install feeds
         run: |
@@ -195,17 +191,142 @@ jobs:
               "configs/${TARGET_NAME}.config" \
               configs/release.config > .config
           fi
+          ./scripts/kconfig.pl + .config \
+            <(printf 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y\nCONFIG_AUTOREMOVE=y\n') > .config.ci
+          mv .config.ci .config
           make defconfig
           if [ "$TARGET_NAME" = "an7581" ] || [ "$TARGET_NAME" = "nnrrwrt-xg040g-md" ]; then
             grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y$' .config
             grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi-usb-sfp=y$' .config
           fi
+          grep -E '^CONFIG_(TARGET_airoha|TARGET_MULTI_PROFILE|DEVEL|CCACHE|AUTOREMOVE|USE_APK|SIGNED_PACKAGES|SIGN_EACH_PACKAGE|USE_LLVM|BPF_TOOLCHAIN|TOOLCHAIN|GCC|BINUTILS|GDB|MUSL|GLIBC|USE_MUSL|USE_GLIBC|USE_RUST|RUST_|PKG_CC_STACKPROTECTOR|SSP_SUPPORT|FORTIFY|RELRO|ASLR|PIE)' .config \
+            | LC_ALL=C sort > tmp/toolchain-cache-key.txt
+          {
+            cat tmp/toolchain-cache-key.txt
+            grep -E '^CONFIG_(TARGET_PER_DEVICE_ROOTFS|PACKAGE_kmod-airoha|PACKAGE_airoha-tr069-fake|PACKAGE_tailscale|PACKAGE_python3)' .config | LC_ALL=C sort || true
+            git -C feeds/packages rev-parse HEAD:lang/rust HEAD:lang/golang HEAD:lang/python HEAD:devel/rust-bindgen 2>/dev/null || true
+            git -C feeds/luci rev-parse HEAD:modules/luci-base HEAD:contrib/package/csstidy 2>/dev/null || true
+          } > tmp/hostpkg-cache-key.txt
+
+      - name: Cache downloads
+        uses: actions/cache@v4
+        with:
+          path: dl
+          key: ponwrt-dl-${{ matrix.target }}-${{ hashFiles('feeds.conf.default', 'configs/*.config') }}
+          restore-keys: |
+            ponwrt-dl-${{ matrix.target }}-
+
+      - name: Cache tools and toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            staging_dir/host
+            staging_dir/toolchain-*
+          key: ponwrt-toolchain-v1-${{ matrix.target }}-${{ hashFiles('tools/**', 'toolchain/**', 'package/system/apk/**', 'package/system/fwtool/**', 'package/system/ucert/**', 'package/system/usign/**', 'package/libs/libubox/**', 'package/libs/libjson-c/**', 'include/host-build.mk', 'include/toolchain-build.mk', 'include/subdir.mk', 'include/kernel-version.mk', 'include/prereq-build.mk', 'rules.mk', 'Makefile', 'tmp/toolchain-cache-key.txt') }}
+
+      - name: Cache host packages and language toolchains
+        id: cache-hostpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            staging_dir/hostpkg
+            staging_dir/target-*/host
+            build_dir/hostpkg
+            build_dir/target-*/host
+          key: ponwrt-hostpkg-v1-${{ matrix.target }}-${{ hashFiles('tools/**', 'toolchain/**', 'package/system/apk/**', 'package/utils/ucode/**', 'package/libs/libubox/**', 'package/libs/ncurses/**', 'package/libs/libffi/**', 'package/libs/libjson-c/**', 'package/utils/lua/**', 'package/utils/bzip2/**', 'package/system/fwtool/**', 'package/system/usign/**', 'package/system/ucert/**', 'package/boot/arm-trusted-firmware-tools/**', 'package/boot/arm-trusted-firmware-airoha/**', 'include/host-build.mk', 'include/toolchain-build.mk', 'include/subdir.mk', 'include/kernel-version.mk', 'include/prereq-build.mk', 'include/rust-values.mk', 'rules.mk', 'Makefile', 'tmp/hostpkg-cache-key.txt') }}
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ponwrt-ccache-v1-${{ matrix.target }}-${{ github.sha }}
+          restore-keys: |
+            ponwrt-ccache-v1-${{ matrix.target }}-
 
       - name: Download sources
         run: make download -j"$(nproc)"
 
+      - name: Refresh restored build cache stamps
+        if: steps.cache-toolchain.outputs.cache-hit == 'true' || steps.cache-hostpkg.outputs.cache-hit == 'true'
+        env:
+          CACHE_TOOLCHAIN_HIT: ${{ steps.cache-toolchain.outputs.cache-hit }}
+          CACHE_HOSTPKG_HIT: ${{ steps.cache-hostpkg.outputs.cache-hit }}
+        run: |
+          stamp_ref="$(mktemp)"
+          trap 'rm -f "$stamp_ref"' EXIT
+          if [ "$CACHE_HOSTPKG_HIT" = "true" ] && [ "$CACHE_TOOLCHAIN_HIT" != "true" ]; then
+            rm -rf \
+              build_dir/hostpkg/apk-* \
+              build_dir/hostpkg/fwtool-* \
+              build_dir/hostpkg/ucert-* \
+              build_dir/hostpkg/usign-* \
+              build_dir/hostpkg/libubox-* \
+              build_dir/hostpkg/json-c-* \
+              staging_dir/hostpkg/stamp/.fwtool_installed \
+              staging_dir/hostpkg/stamp/.ucert_installed \
+              staging_dir/hostpkg/stamp/.usign_installed
+          fi
+          touch "$stamp_ref"
+          if [ "$CACHE_TOOLCHAIN_HIT" = "true" ]; then
+            [ -f staging_dir/host/.prereq-build ] && touch -r "$stamp_ref" staging_dir/host/.prereq-build
+            [ -f staging_dir/host/.prepared ] && touch -r "$stamp_ref" staging_dir/host/.prepared
+          fi
+          if [ "$CACHE_HOSTPKG_HIT" = "true" ]; then
+            host_build_dirs=()
+            for dir in build_dir/hostpkg build_dir/hostpkg/pypi build_dir/target-*/host; do
+              [ -d "$dir" ] && host_build_dirs+=("$dir")
+            done
+            if [ "${#host_build_dirs[@]}" -gt 0 ]; then
+              find "${host_build_dirs[@]}" -maxdepth 2 -type f -name '.prepared*' -exec touch -r "$stamp_ref" {} +
+              sleep 1
+              touch "$stamp_ref"
+              find "${host_build_dirs[@]}" -maxdepth 2 -type f -name '.configured*' -exec touch -r "$stamp_ref" {} +
+              sleep 1
+              touch "$stamp_ref"
+              find "${host_build_dirs[@]}" -maxdepth 2 -type f -name '.built*' -exec touch -r "$stamp_ref" {} +
+            fi
+            sleep 1
+            touch "$stamp_ref"
+            if [ -d staging_dir/hostpkg/stamp ]; then
+              find staging_dir/hostpkg/stamp -maxdepth 1 -type f -name '.*_installed' -exec touch -r "$stamp_ref" {} +
+            fi
+          fi
+          if [ "$CACHE_TOOLCHAIN_HIT" = "true" ]; then
+            sleep 1
+            touch "$stamp_ref"
+            if [ -d staging_dir/host/stamp ]; then
+              find staging_dir/host/stamp -maxdepth 1 -type f -name '.*_installed' -exec touch -r "$stamp_ref" {} +
+            fi
+            sleep 1
+            touch "$stamp_ref"
+            if [ -d staging_dir/host/stamp ]; then
+              find staging_dir/host/stamp -maxdepth 1 -type f -name '.tools_compile*' -exec touch -r "$stamp_ref" {} +
+            fi
+            for info_mk in staging_dir/toolchain-*/info.mk; do
+              [ -f "$info_mk" ] && touch -r "$stamp_ref" "$info_mk"
+            done
+            for stamp_dir in staging_dir/toolchain-*/stamp; do
+              [ -d "$stamp_dir" ] && find "$stamp_dir" -maxdepth 1 -type f -name '.*_installed' -exec touch -r "$stamp_ref" {} +
+            done
+            sleep 1
+            touch "$stamp_ref"
+            for stamp_dir in staging_dir/toolchain-*/stamp; do
+              [ -d "$stamp_dir" ] && find "$stamp_dir" -maxdepth 1 -type f -name '.toolchain_compile*' -exec touch -r "$stamp_ref" {} +
+            done
+          fi
+
       - name: Build ${{ matrix.target }}
-        run: make -j"$(nproc)"
+        env:
+          CCACHE_COMPRESS: "true"
+          CCACHE_MAXSIZE: "1.5G"
+          CCACHE_COMPILERCHECK: "content"
+          CCACHE_SLOPPINESS: "time_macros,locale"
+        run: |
+          make -j"$(nproc)"
+          if [ -x staging_dir/host/bin/ccache ]; then
+            CCACHE_DIR="$PWD/.ccache" staging_dir/host/bin/ccache -s
+          fi
 
       - name: Remove temporary private signing key
         if: always()
