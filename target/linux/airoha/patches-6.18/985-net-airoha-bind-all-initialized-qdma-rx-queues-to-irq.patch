@@ -1,0 +1,62 @@
+From: grislux55 <jebchou.hg@gmail.com>
+Subject: [PATCH] net: airoha: bind all initialized QDMA RX queues to IRQ banks
+
+airoha_qdma_init_rx() checked RX_DONE_INT_MASK (0xffffffff) when deciding
+whether an RX queue is bound to an IRQ, initializing all 32 QDMA RX rings.
+Meanwhile RX_IRQ0..3_BANK_PIN_MASK only routed 22 queues
+(0..9, 15, 21..31), leaving 10 initialized RX queues (10..14 and 16..20)
+unbound to any GIC interrupt bank.
+
+Frames steered to any of those 10 queues by default CDM CPU-reason queue
+selectors accumulate in the ring and PSE shared pages without ever
+scheduling NAPI, eventually asserting port-wide FE_CPORT_PORT_XFC_MASK
+backpressure on CDM2 and wedging downstream PON RX.
+
+Route RX queues 10..14 to IRQ bank 2 and RX queues 16..20 to IRQ bank 3,
+enforce disjoint full-32-queue coverage via compile-time static_assert
+checks, and guard airoha_qdma_init_rx() with RX_IRQ_BANK_PIN_ALL_MASK.
+
+Signed-off-by: grislux55 <jebchou.hg@gmail.com>
+---
+--- a/drivers/net/ethernet/airoha/airoha_eth.h
++++ b/drivers/net/ethernet/airoha/airoha_eth.h
+@@ -589,10 +589,22 @@
+ };
+ 
+ /* RX queue to IRQ mapping: BIT(q) in IRQ(n) */
+-#define RX_IRQ0_BANK_PIN_MASK			0x839f
+-#define RX_IRQ1_BANK_PIN_MASK			0xffe00000
+-#define RX_IRQ2_BANK_PIN_MASK			0x20
+-#define RX_IRQ3_BANK_PIN_MASK			0x40
++#define RX_IRQ0_BANK_PIN_MASK			0x0000839fU
++#define RX_IRQ1_BANK_PIN_MASK			0xffe00000U
++#define RX_IRQ2_BANK_PIN_MASK			0x00007c20U
++#define RX_IRQ3_BANK_PIN_MASK			0x001f0040U
++#define RX_IRQ_BANK_PIN_ALL_MASK		\
++	(RX_IRQ0_BANK_PIN_MASK |		\
++	 RX_IRQ1_BANK_PIN_MASK |		\
++	 RX_IRQ2_BANK_PIN_MASK |		\
++	 RX_IRQ3_BANK_PIN_MASK)
++static_assert(!(RX_IRQ0_BANK_PIN_MASK & RX_IRQ1_BANK_PIN_MASK) &&
++	      !(RX_IRQ0_BANK_PIN_MASK & RX_IRQ2_BANK_PIN_MASK) &&
++	      !(RX_IRQ0_BANK_PIN_MASK & RX_IRQ3_BANK_PIN_MASK) &&
++	      !(RX_IRQ1_BANK_PIN_MASK & RX_IRQ2_BANK_PIN_MASK) &&
++	      !(RX_IRQ1_BANK_PIN_MASK & RX_IRQ3_BANK_PIN_MASK) &&
++	      !(RX_IRQ2_BANK_PIN_MASK & RX_IRQ3_BANK_PIN_MASK));
++static_assert(RX_IRQ_BANK_PIN_ALL_MASK == 0xffffffffU);
+ #define RX_IRQ_BANK_PIN_MASK(_n)		\
+ 	(((_n) == 3) ? RX_IRQ3_BANK_PIN_MASK :	\
+ 	 ((_n) == 2) ? RX_IRQ2_BANK_PIN_MASK :	\
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -1360,8 +1360,8 @@
+ 	for (i = 0; i < ARRAY_SIZE(qdma->q_rx); i++) {
+ 		int err, ndesc;
+ 
+-		if (!(RX_DONE_INT_MASK & BIT(i))) {
+-			/* rx-queue not binded to irq */
++		if (!(RX_IRQ_BANK_PIN_ALL_MASK & BIT(i))) {
++			/* rx-queue not bound to any irq bank */
+ 			continue;
+ 		}
+ 

@@ -1,0 +1,184 @@
+From: grislux55 <jebchou.hg@gmail.com>
+Subject: [PATCH] net: airoha: prevent QDMA RX ring over-consumption and OOM stall
+
+airoha_qdma_fill_rx_queue() intentionally leaves the descriptor at q->head
+unposted (q->queued < q->ndesc - 1) so REG_RX_CPU_IDX never equals
+REG_RX_DMA_IDX while buffers remain posted. However,
+airoha_qdma_rx_process() previously looped on (done < budget) without
+checking q->queued and never cleared QDMA_DESC_DONE_MASK on consumed
+descriptors.
+
+Once a ring has wrapped at least once, q->desc[q->head] still carries
+QDMA_DESC_DONE_MASK from the previous lap. When all ndesc - 1 posted
+descriptors complete before a single NAPI poll (such as 31 frames on a
+32-descriptor ring or 127 frames on a 128-descriptor ring with budget >= 64
+or 128), the poll walks past q->head across unposted descriptors, drives
+q->queued negative, double-recycles page_pool buffers, and causes
+airoha_qdma_fill_rx_queue() to write REG_RX_CPU_IDX == REG_RX_DMA_IDX.
+Hardware interprets CPU_IDX == DMA_IDX as zero available RX descriptors,
+permanently stalling the ring and asserting FE_CPORT_PORT_XFC_MASK
+backpressure across CDM2 -> PSE -> GDM2 -> PON MBI RX.
+
+In addition, RX_NO_CPU_DSCP interrupts are enabled in QDMA hardware via
+INT_RX1_MASK/INT_RX2_MASK, but airoha_irq_handler() only masked and
+dispatched RX_DONE bits while leaving empty-ring recovery unscheduled if
+page_pool allocation fails under transient memory pressure.
+
+Bound airoha_qdma_rx_process() by q->queued, clear desc->ctrl upon
+consumption, handle and mask RX_NO_CPU_DSCP alongside RX_DONE in
+airoha_irq_handler(), re-arm both interrupts in airoha_qdma_rx_napi_poll()
+only when descriptors are posted, and schedule a delayed NAPI refill retry
+when q->queued reaches zero.
+
+Signed-off-by: grislux55 <jebchou.hg@gmail.com>
+---
+--- a/drivers/net/ethernet/airoha/airoha_eth.h
++++ b/drivers/net/ethernet/airoha/airoha_eth.h
+@@ -15,6 +15,7 @@
+ #include <linux/netdevice.h>
+ #include <linux/reset.h>
+ #include <linux/soc/airoha/airoha_offload.h>
++#include <linux/workqueue.h>
+ #include <net/dsa.h>
+ 
+ #define AIROHA_MAX_NUM_GDM_PORTS	4
+@@ -224,6 +225,7 @@
+ 	bool flushing;
+ 
+ 	struct napi_struct napi;
++	struct delayed_work refill_work;
+ 	struct page_pool *page_pool;
+ 	struct sk_buff *skb;
+ 
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -1028,7 +1028,7 @@
+ 	int qid = q - &q->qdma->q_rx[0], done = 0;
+ 	struct airoha_eth *eth = q->qdma->eth;
+ 
+-	while (done < budget) {
++	while (q->queued && done < budget) {
+ 		struct airoha_queue_entry *e = &q->entry[q->tail];
+ 		struct airoha_qdma_desc *desc = &q->desc[q->tail];
+ 		u32 hash, reason, msg0, msg1, desc_ctrl;
+@@ -1043,6 +1043,7 @@
+ 			break;
+ 
+ 		dma_rmb();
++		WRITE_ONCE(desc->ctrl, 0);
+ 
+ 		q->tail = (q->tail + 1) % q->ndesc;
+ 		q->queued--;
+@@ -1192,6 +1193,18 @@
+ 	return done;
+ }
+ 
++#define AIROHA_RX_REFILL_DELAY_MS	10
++
++static void airoha_qdma_rx_refill_work(struct work_struct *work)
++{
++	struct airoha_queue *q = container_of(work, struct airoha_queue,
++					      refill_work.work);
++
++	local_bh_disable();
++	napi_schedule(&q->napi);
++	local_bh_enable();
++}
++
+ static int airoha_qdma_rx_napi_poll(struct napi_struct *napi, int budget)
+ {
+ 	struct airoha_queue *q = container_of(napi, struct airoha_queue, napi);
+@@ -1204,16 +1217,29 @@
+ 
+ 	if (done < budget && napi_complete(napi)) {
+ 		struct airoha_qdma *qdma = q->qdma;
+-		int i, qid = q - &qdma->q_rx[0];
+-		int intr_reg = qid < RX_DONE_HIGH_OFFSET ? QDMA_INT_REG_IDX1
+-							 : QDMA_INT_REG_IDX2;
++		int i, intr_reg, qid = q - &qdma->q_rx[0];
++		u32 intr_mask;
++
++		if (unlikely(!q->queued)) {
++			schedule_delayed_work(&q->refill_work,
++					      msecs_to_jiffies(AIROHA_RX_REFILL_DELAY_MS));
++			return done;
++		}
++
++		if (qid < RX_DONE_HIGH_OFFSET) {
++			intr_reg = QDMA_INT_REG_IDX1;
++			intr_mask = INT_RX1_MASK(BIT(qid));
++		} else {
++			intr_reg = QDMA_INT_REG_IDX2;
++			intr_mask = INT_RX2_MASK(BIT(qid));
++		}
+ 
+ 		for (i = 0; i < ARRAY_SIZE(qdma->irq_banks); i++) {
+ 			if (!(BIT(qid) & RX_IRQ_BANK_PIN_MASK(i)))
+ 				continue;
+ 
+ 			airoha_qdma_irq_enable(&qdma->irq_banks[i], intr_reg,
+-					       BIT(qid % RX_DONE_HIGH_OFFSET));
++					       intr_mask);
+ 		}
+ 	}
+ 
+@@ -1262,6 +1288,7 @@
+ 
+ 	q->buf_size = lro_q ? pp_params.max_len : pp_params.max_len / 2;
+ 	q->ndesc = ndesc;
++	INIT_DELAYED_WORK(&q->refill_work, airoha_qdma_rx_refill_work);
+ 	netif_napi_add(eth->napi_dev, &q->napi, airoha_qdma_rx_napi_poll);
+ 	WRITE_ONCE(q->napi.weight,
+ 		   clamp_t(unsigned int, READ_ONCE(rx_napi_weight), 16, 256));
+@@ -1975,16 +2002,27 @@
+ 	if (!test_bit(DEV_STATE_INITIALIZED, &qdma->eth->state))
+ 		return IRQ_NONE;
+ 
+-	rx_intr1 = intr[1] & RX_DONE_LOW_INT_MASK;
++	rx_intr1 = intr[1] & (RX_DONE_LOW_INT_MASK |
++			      RX_NO_CPU_DSCP_LOW_INT_MASK);
+ 	if (rx_intr1) {
+-		airoha_qdma_irq_disable(irq_bank, QDMA_INT_REG_IDX1, rx_intr1);
+-		rx_intr_mask |= rx_intr1;
+-	}
+-
+-	rx_intr2 = intr[2] & RX_DONE_HIGH_INT_MASK;
++		u32 qmask = (rx_intr1 & RX_DONE_LOW_INT_MASK) |
++			    (rx_intr1 >> RX_NO_CPU_DSCP_LOW_OFFSET);
++
++		airoha_qdma_irq_disable(irq_bank, QDMA_INT_REG_IDX1,
++					INT_RX1_MASK(qmask));
++		rx_intr_mask |= qmask;
++	}
++
++	rx_intr2 = intr[2] & (RX_DONE_HIGH_INT_MASK |
++			      RX_NO_CPU_DSCP_HIGH_INT_MASK);
+ 	if (rx_intr2) {
+-		airoha_qdma_irq_disable(irq_bank, QDMA_INT_REG_IDX2, rx_intr2);
+-		rx_intr_mask |= (rx_intr2 << 16);
++		u32 qmask = ((rx_intr2 & RX_DONE_HIGH_INT_MASK) <<
++			     RX_DONE_HIGH_OFFSET) |
++			    (rx_intr2 & RX_NO_CPU_DSCP_HIGH_INT_MASK);
++
++		airoha_qdma_irq_disable(irq_bank, QDMA_INT_REG_IDX2,
++					INT_RX2_MASK(qmask));
++		rx_intr_mask |= qmask;
+ 	}
+ 
+ 	for (i = 0; rx_intr_mask && i < ARRAY_SIZE(qdma->q_rx); i++) {
+@@ -2100,6 +2138,7 @@
+ 		if (!qdma->q_rx[i].ndesc)
+ 			continue;
+ 
++		cancel_delayed_work_sync(&qdma->q_rx[i].refill_work);
+ 		netif_napi_del(&qdma->q_rx[i].napi);
+ 		airoha_qdma_cleanup_rx_queue(&qdma->q_rx[i]);
+ 		if (qdma->q_rx[i].page_pool) {
+@@ -2201,6 +2240,7 @@
+ 			continue;
+ 
+ 		napi_disable(&qdma->q_rx[i].napi);
++		cancel_delayed_work_sync(&qdma->q_rx[i].refill_work);
+ 	}
+ }
+ 
