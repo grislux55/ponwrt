@@ -2,7 +2,7 @@
 
 English | [简体中文](README_zh.md)
 
-**NNRRWrt** is a Linux 6.18 optical gateway, main-router, and relay firmware primarily engineered for **Nokia XG-040G-MD** (Airoha AN7581, UBI & USB-SFP variants), while maintaining target compatibility across Airoha AN7581 and AN7583 PON devices. It is built upon [ImmortalWrt](https://github.com/immortalwrt/immortalwrt) and [PonWrt](https://github.com/pbs05/ponwrt).
+**NNRRWrt** is a Linux 6.18 optical gateway, main-router, and relay firmware targeting **Nokia XG-040G-MD** (Airoha AN7581, UBI & USB-SFP variants) and compatible Airoha AN7581 / AN7583 PON devices, built on [ImmortalWrt](https://github.com/immortalwrt/immortalwrt) and [PonWrt](https://github.com/pbs05/ponwrt).
 
 ## ⚠️ Disclaimer
 
@@ -14,7 +14,7 @@ Users are responsible for ensuring that their use complies with applicable laws,
 
 The authors and contributors are not responsible for device damage, network service disruption, or other consequences resulting from flashing, configuring, or using this project.
 
-## Repository Ecosystem
+## Repositories
 
 | Repository | Feed / Role | Description |
 | --- | --- | --- |
@@ -24,12 +24,12 @@ The authors and contributors are not responsible for device damage, network serv
 | [`pbs05/an758x-stock2ubi`](https://github.com/pbs05/an758x-stock2ubi) | Upstream Tool | Stock flash backup and in-place UBI layout migration utility |
 | [`pbs05/uboot-an758x`](https://github.com/pbs05/uboot-an758x) | Upstream Bootloader | BL2/FIP bootloader and Web recovery interface for Airoha AN758x |
 
-## Key Capabilities (Nokia XG-040G-MD Profile)
+## Features (Nokia XG-040G-MD Profile)
 
 - **Hardware Offload & Long-Haul QDMA Stability**: Enables Airoha PPE hardware flow offloading (`FLOW_STATS`, tunable `bind_rate`), PON multi-GEM P-bit offload, shared-QDMA hardware LRO across WAN (`pon0`) and 2.5GbE LAN (`lan1`), EIP-93 hardware crypto + ARM64 NEON AES, RPS/XPS + `irqbalance`, TCP BBR, FullCone NAT, and QDMA RX ring anti-stall / full 32-queue IRQ binding fixes.
 - **Flexible Topologies & IPTV Isolation**: Out-of-the-box Optical Main Router (`pon0` WAN + `br-lan` `192.168.1.1/24`), Transparent Optical Bridge, and Bypass Relay support, with `firewall4` bridge flowtable exclusions protecting `br-iptv`.
 - **Dual-Stack OMCI & Isolated TR-069 Sandbox**: `airoha-pond` parses dual-stack OMCI management channel MEs (`ME 134/136/340/347`), paired with `airoha-tr069-fake` running inside an isolated `netifd`/`firewall4` routing table and virtual CWMP data model.
-- **Optical Gateway Dashboard, Full 10-LED Support & UBI Safety**: Ships with `luci-app-nnrrwrt-dashboard` (`admin/dashboard`), complete 10-LED LuCI control (`power`, `pon`, `los`, `internet`, `lan1..lan4`, `usb1..usb2`), read-only 5-volume UBI archive export (`bosa`, `ri`, `fip`, `ubootenv`, `ubootenv2`), and automatic convergence of unconfigured Tailscale/DDNS services.
+- **Optical Gateway Dashboard, 10-LED Control & UBI Backup**: Ships with `luci-app-nnrrwrt-dashboard` (`admin/dashboard`), 10-LED LuCI control (`power`, `pon`, `los`, `internet`, `lan1..lan4`, `usb1..usb2`), read-only 5-volume UBI archive export (`bosa`, `ri`, `fip`, `ubootenv`, `ubootenv2`), and disabled autostart for unconfigured Tailscale/DDNS services.
 
 ## Supported devices
 
@@ -74,7 +74,7 @@ cd nnrrwrt
 ./scripts/feeds install -a
 
 # 4. Select configuration
-# Option A (Recommended): NNRRWrt customized profile for Nokia XG-040G-MD (UBI & USB-SFP)
+# Option A (Recommended): Nokia XG-040G-MD (UBI & USB-SFP) configuration
 cp configs/nnrrwrt-xg040g-md.config .config
 
 # Option B: Generic multi-device AN7581 / AN7583 release configuration
