@@ -9,7 +9,8 @@ uci_write_config() {
 	uci -q commit cpufreq
 }
 
-[ "$(uci -q get cpufreq.global.set)" -eq "1" ] && exit 0
+[ "$(uci -q get cpufreq.global.set || echo 0)" = "1" ] && exit 0
+[ -d '/sys/devices/system/cpu/cpufreq/policy0' ] || exit 0
 
 CPU_FREQS="$(cat '/sys/devices/system/cpu/cpufreq/policy0/scaling_available_frequencies')"
 CPU_MIN_FREQ="$(cat '/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq')"
@@ -19,6 +20,10 @@ SOC="$(strings '/proc/device-tree/compatible' | tail -n1)"
 
 source "/etc/openwrt_release"
 case "$DISTRIB_TARGET" in
+	"airoha/an7581"|\
+	"airoha/an7583")
+		uci_write_config 0 schedutil "$CPU_MIN_FREQ" "$CPU_MAX_FREQ"
+		;;
 	"bcm27xx/bcm2710")
 		uci_write_config 0 ondemand 600000 "$CPU_MAX_FREQ" 10 50
 		;;
