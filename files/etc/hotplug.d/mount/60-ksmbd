@@ -1,0 +1,72 @@
+#!/bin/sh
+
+case "$DEVICE" in
+	""|fit*|ubi*|ubiblock*|mtdblock*|loop*|ram*|zram*)
+		exit 0
+		;;
+esac
+
+. /usr/share/libubox/jshn.sh
+
+device_get_vars() {
+	json_init
+	json_load "$(ubus call block info)"
+
+	json_select devices || return 1
+
+	json_get_keys keys
+	for key in $keys
+	do
+		json_select "$key"
+
+		json_get_var device device
+		if [ "$device" = "$1" ]; then
+			shift
+			json_get_vars "$@"
+			json_select ..
+			json_select ..
+			return 0
+		fi
+
+		json_select ..
+	done
+
+	json_select ..
+
+	return 2
+}
+
+[ -f /var/run/config/ksmbd ] || {
+	mkdir -p /var/run/config && touch /var/run/config/ksmbd
+}
+
+if [ "$ACTION" = "add" ]; then
+	device_get_vars "$DEVICE" label mount || {
+		logger -t ksmbd-hotplug "Failed to get $DEVICE info"
+		exit 1
+	}
+	case "$mount" in
+		""|/|/rom|/rom/*|/overlay|/overlay/*|/boot|/boot/*|/tmp|/tmp/*|/var|/var/*|/etc|/etc/*|/usr|/usr/*|/proc/*|/sys/*|/dev/*)
+			exit 0
+			;;
+	esac
+	uci -c /var/run/config batch <<-EOF
+		set ksmbd.$DEVICE="share"
+		set ksmbd.$DEVICE.name="${label:-$DEVICE}"
+		set ksmbd.$DEVICE.path="$mount"
+		set ksmbd.$DEVICE.browseable="yes"
+		set ksmbd.$DEVICE.read_only="yes"
+		set ksmbd.$DEVICE.guest_ok="yes"
+		commit ksmbd
+	EOF
+	/etc/init.d/ksmbd reload
+fi
+
+if [ "$ACTION" = "remove" ]; then
+	uci -q -c /var/run/config get "ksmbd.$DEVICE" >/dev/null || exit 0
+	uci -c /var/run/config batch <<-EOF
+		delete ksmbd.$DEVICE
+		commit ksmbd
+	EOF
+	/etc/init.d/ksmbd reload
+fi

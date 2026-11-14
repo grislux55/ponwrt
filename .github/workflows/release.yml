@@ -71,7 +71,8 @@ jobs:
           else
             gitleaks git . --config .gitleaks.toml --no-banner --redact --log-opts="-n 50"
           fi
-          for dir in configs target/linux/airoha scripts package/base-files/files-nnrrwrt .github; do
+          for dir in configs target/linux/airoha scripts files package/base-files/files-nnrrwrt .github; do
+            [ -d "$dir" ] || continue
             gitleaks dir "$dir" --config .gitleaks.toml --no-banner --redact
           done
 
