@@ -115,6 +115,8 @@ if [ "$WITH_DEFCONFIG" -eq 1 ]; then
 	grep -q '^CONFIG_PACKAGE_airoha-pond=y$' .config || fail "nnrrwrt-xg040g-md defconfig missing airoha-pond"
 	grep -q '^CONFIG_PACKAGE_luci-app-pon=y$' .config || fail "nnrrwrt-xg040g-md defconfig missing luci-app-pon"
 	grep -q '^CONFIG_PACKAGE_luci-app-iptv=y$' .config || fail "nnrrwrt-xg040g-md defconfig missing luci-app-iptv"
+	grep -q '^CONFIG_PACKAGE_luci-app-ledtrig-usbport=y$' .config || fail "nnrrwrt-xg040g-md defconfig missing luci-app-ledtrig-usbport"
+	grep -q '^CONFIG_PACKAGE_luci-app-nnrrwrt-dashboard=y$' .config || fail "nnrrwrt-xg040g-md defconfig missing luci-app-nnrrwrt-dashboard"
 	if grep -qE '^CONFIG_PACKAGE_(wpad|hostapd|wifi-scripts|wireless-regdb|iw|kmod-cfg80211|kmod-mac80211|kmod-mt76|kmod-mt79).*=[ym]$' .config; then
 		fail "nnrrwrt-xg040g-md defconfig unexpectedly enabled wireless stack or drivers"
 	fi
