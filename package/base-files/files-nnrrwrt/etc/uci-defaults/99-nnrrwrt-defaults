@@ -54,8 +54,174 @@ if [ -f /etc/config/uhttpd ]; then
 	fi
 fi
 
+backfill_board_leds() {
+	local board_file="/etc/board.json"
+	local cur_board=""
+	local existing_sysfs=""
+	local led_keys=""
+	local led_id=""
+
+	[ -r /tmp/sysinfo/board_name ] && cur_board="$(cat /tmp/sysinfo/board_name)"
+	if [ -x /bin/board_detect ]; then
+		if [ ! -s "$board_file" ]; then
+			/bin/board_detect || true
+		elif [ "$cur_board" = "nokia,xg-040g-md-ubi" ] && ! grep -q '"mt7530-0:0f:green:lan-1"' "$board_file" 2>/dev/null; then
+			/bin/board_detect -f || true
+		fi
+	fi
+
+	[ -s "$board_file" ] || return 0
+	[ -r /usr/share/libubox/jshn.sh ] || return 0
+
+	# shellcheck disable=SC1091
+	. /usr/share/libubox/jshn.sh
+
+	json_init
+	json_load_file "$board_file" 2>/dev/null || return 0
+	if ! json_is_a led object; then
+		json_cleanup
+		return 0
+	fi
+
+	existing_sysfs="$(uci -q show system | sed -n "s/^system\\.[^.]*\\.sysfs='\\(.*\\)'$/\\1/p")"
+
+	json_select led
+	json_get_keys led_keys
+	for led_id in $led_keys; do
+		local cfg="led_$led_id"
+		local name="" sysfs="" type="" trigger="" default=""
+
+		json_select "$led_id"
+		json_get_vars name sysfs type trigger default
+
+		if [ -n "$sysfs" ] && \
+		   ! printf '%s\n' "$existing_sysfs" | grep -qxF "$sysfs" && \
+		   ! uci -q get "system.$cfg" >/dev/null; then
+			uci set "system.$cfg=led"
+			[ -n "$name" ] && uci set "system.$cfg.name=$name"
+			uci set "system.$cfg.sysfs=$sysfs"
+			[ -n "$trigger" ] && uci set "system.$cfg.trigger=$trigger"
+			[ -n "$default" ] && uci set "system.$cfg.default=$default"
+
+			case "$type" in
+				netdev)
+					local device="" mode=""
+					json_get_vars device mode
+					uci set "system.$cfg.trigger=netdev"
+					[ -n "$device" ] && uci set "system.$cfg.dev=$device"
+					[ -n "$mode" ] && uci set "system.$cfg.mode=$mode"
+					;;
+				usbport)
+					local port=""
+					unset ports
+					json_get_values ports ports
+					uci set "system.$cfg.trigger=usbport"
+					for port in $ports; do
+						uci add_list "system.$cfg.port=$port"
+					done
+					unset ports
+					;;
+				timer|oneshot)
+					local delayon="" delayoff=""
+					json_get_vars delayon delayoff
+					uci set "system.$cfg.trigger=$type"
+					[ -n "$delayon" ] && uci set "system.$cfg.delayon=$delayon"
+					[ -n "$delayoff" ] && uci set "system.$cfg.delayoff=$delayoff"
+					;;
+				gpio)
+					local gpio="" inverted=""
+					json_get_vars gpio inverted
+					uci set "system.$cfg.trigger=gpio"
+					[ -n "$gpio" ] && uci set "system.$cfg.gpio=$gpio"
+					[ -n "$inverted" ] && uci set "system.$cfg.inverted=$inverted"
+					;;
+			esac
+
+			existing_sysfs="$existing_sysfs
+$sysfs"
+		fi
+
+		json_select ..
+	done
+	json_select ..
+	json_cleanup
+}
+
+converge_tailscale_defaults() {
+	[ -f /etc/config/tailscale ] || return 0
+
+	local ts_dirty=0
+	local ts_enabled=""
+	local ts_state=""
+
+	ts_enabled="$(uci -q get tailscale.settings.service_enabled || true)"
+	ts_state="$(uci -q get tailscale.settings.state_file || true)"
+	[ -n "$ts_state" ] || ts_state="/etc/tailscale/tailscaled.state"
+
+	if [ -z "$ts_enabled" ]; then
+		if [ ! -s "$ts_state" ] || ! grep -q '"_profiles"' "$ts_state" 2>/dev/null; then
+			uci set tailscale.settings.service_enabled='0'
+			if [ -z "$(uci -q get tailscale.settings.dns_mode || true)" ]; then
+				uci set tailscale.settings.dns_mode='disabled'
+			fi
+			ts_enabled="0"
+			ts_dirty=1
+		fi
+	fi
+
+	[ "$ts_dirty" -eq 1 ] && uci commit tailscale
+
+	if [ "$ts_enabled" = "0" ] && [ -x /etc/init.d/tailscale ]; then
+		/etc/init.d/tailscale stop >/dev/null 2>&1 || true
+		/etc/init.d/tailscale disable >/dev/null 2>&1 || true
+	fi
+}
+
+converge_ddns_defaults() {
+	[ -f /etc/config/ddns ] || return 0
+
+	local ddns_dirty=0
+	local sec=""
+	local ddns_active=0
+
+	for sec in myddns_ipv4 myddns_ipv6; do
+		local sec_host="" sec_en=""
+		sec_host="$(uci -q get "ddns.$sec.lookup_host" || true)"
+		sec_en="$(uci -q get "ddns.$sec.enabled" || true)"
+		if [ "$sec_host" = "yourhost.example.com" ]; then
+			case "${sec_en:-0}" in
+				1|on|true|yes|enabled) ;;
+				*)
+					uci -q delete "ddns.$sec" || true
+					ddns_dirty=1
+					;;
+			esac
+		fi
+	done
+
+	[ "$ddns_dirty" -eq 1 ] && uci commit ddns
+
+	for sec in $(uci -q show ddns | sed -n "s/^ddns\\.\\([^.=]*\\)=service$/\\1/p"); do
+		case "$(uci -q get "ddns.$sec.enabled" || true)" in
+			1|on|true|yes|enabled)
+				ddns_active=1
+				break
+				;;
+		esac
+	done
+
+	if [ "$ddns_active" -eq 0 ] && [ -x /etc/init.d/ddns ]; then
+		/etc/init.d/ddns stop >/dev/null 2>&1 || true
+		/etc/init.d/ddns disable >/dev/null 2>&1 || true
+	fi
+}
+
+backfill_board_leds
+
 uci commit system
 [ -f /etc/config/irqbalance ] && uci commit irqbalance
 [ -f /etc/config/uhttpd ] && uci commit uhttpd
+converge_tailscale_defaults
+converge_ddns_defaults
 
 exit 0
