@@ -68,6 +68,9 @@ grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y$' con
 grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi-usb-sfp=y$' configs/nnrrwrt-xg040g-md.config || fail "nnrrwrt-xg040g-md.config missing nokia_xg-040g-md-ubi-usb-sfp"
 grep -q '^CONFIG_VERSION_DIST="NNRRWrt"$' configs/nnrrwrt-xg040g-md.config || fail "nnrrwrt-xg040g-md.config missing VERSION_DIST=NNRRWrt"
 grep -q '^CONFIG_VERSION_HOME_URL="https://github.com/grislux55/nnrrwrt"$' configs/nnrrwrt-xg040g-md.config || fail "nnrrwrt-xg040g-md.config missing VERSION_HOME_URL"
+grep -q '^CONFIG_PACKAGE_drill=y$' configs/nnrrwrt-xg040g-md.config || fail "nnrrwrt-xg040g-md.config missing drill"
+grep -q '^CONFIG_PACKAGE_cpufreq=y$' configs/nnrrwrt-xg040g-md.config || fail "nnrrwrt-xg040g-md.config missing cpufreq"
+grep -q '^CONFIG_PACKAGE_luci-app-cpufreq=y$' configs/nnrrwrt-xg040g-md.config || fail "nnrrwrt-xg040g-md.config missing luci-app-cpufreq"
 if grep -qE '^CONFIG_PACKAGE_(wpad|hostapd|wifi-scripts|wireless-regdb|iw|kmod-cfg80211|kmod-mac80211|kmod-mt76|kmod-mt79).*=[ym]$' configs/nnrrwrt-xg040g-md.config; then
 	fail "nnrrwrt-xg040g-md.config must not enable wireless stack or drivers"
 fi
@@ -118,6 +121,9 @@ if [ "$WITH_DEFCONFIG" -eq 1 ]; then
 	grep -q '^CONFIG_PACKAGE_luci-app-iptv=y$' .config || fail "nnrrwrt-xg040g-md defconfig missing luci-app-iptv"
 	grep -q '^CONFIG_PACKAGE_luci-app-ledtrig-usbport=y$' .config || fail "nnrrwrt-xg040g-md defconfig missing luci-app-ledtrig-usbport"
 	grep -q '^CONFIG_PACKAGE_luci-app-nnrrwrt-dashboard=y$' .config || fail "nnrrwrt-xg040g-md defconfig missing luci-app-nnrrwrt-dashboard"
+	grep -q '^CONFIG_PACKAGE_drill=y$' .config || fail "nnrrwrt-xg040g-md defconfig missing drill"
+	grep -q '^CONFIG_PACKAGE_cpufreq=y$' .config || fail "nnrrwrt-xg040g-md defconfig missing cpufreq"
+	grep -q '^CONFIG_PACKAGE_luci-app-cpufreq=y$' .config || fail "nnrrwrt-xg040g-md defconfig missing luci-app-cpufreq"
 	if grep -qE '^CONFIG_PACKAGE_(wpad|hostapd|wifi-scripts|wireless-regdb|iw|kmod-cfg80211|kmod-mac80211|kmod-mt76|kmod-mt79).*=[ym]$' .config; then
 		fail "nnrrwrt-xg040g-md defconfig unexpectedly enabled wireless stack or drivers"
 	fi
