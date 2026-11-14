@@ -1,0 +1,80 @@
+From: grislux55 <jebchou.hg@gmail.com>
+Subject: [PATCH] block: skip error logs for absent candidate fstab paths
+
+During preinit extroot probing, config_load() checks up to three candidate
+fstab locations before rootfs_data or uci-defaults has populated
+/etc/config/fstab, logging ULOG_ERR for each missing candidate path.
+
+Check stat() before calling uci_load() so absent optional paths return
+quietly while parse or I/O failures on existing files remain reported at
+ULOG_ERR.
+
+Signed-off-by: grislux55 <jebchou.hg@gmail.com>
+---
+--- a/block.c
++++ b/block.c
+@@ -519,13 +519,24 @@
+ {
+ }
+ 
+-static struct uci_package * config_try_load(struct uci_context *ctx, char *path)
++static struct uci_package * config_try_load(struct uci_context *ctx, char *path, bool *found)
+ {
+-	char *file = basename(path);
+-	char *dir = dirname(path);
++	struct stat s;
++	char *file;
++	char *dir;
+ 	char *err;
+ 	struct uci_package *pkg;
+ 
++	if (stat(path, &s)) {
++		if (errno != ENOENT && errno != ENOTDIR)
++			ULOG_ERR("unable to stat %s (%m)\n", path);
++		return NULL;
++	}
++
++	*found = true;
++	file = basename(path);
++	dir = dirname(path);
++
+ 	uci_set_confdir(ctx, dir);
+ 	ULOG_INFO("attempting to load %s/%s\n", dir, file);
+ 
+@@ -545,27 +556,32 @@
+ 	struct uci_context *ctx = uci_alloc_context();
+ 	struct uci_package *pkg = NULL;
+ 	struct uci_element *e;
++	bool found = false;
+ 	char path[64];
+ 
+ 	vlist_init(&mounts, avl_strcmp, mounts_update);
+ 
+ 	if (cfg) {
+ 		snprintf(path, sizeof(path), "%s/upper/etc/config/fstab", cfg);
+-		pkg = config_try_load(ctx, path);
++		pkg = config_try_load(ctx, path, &found);
+ 
+ 		if (!pkg) {
+ 			snprintf(path, sizeof(path), "%s/etc/config/fstab", cfg);
+-			pkg = config_try_load(ctx, path);
++			pkg = config_try_load(ctx, path, &found);
+ 		}
+ 	}
+ 
+ 	if (!pkg) {
+ 		snprintf(path, sizeof(path), "/etc/config/fstab");
+-		pkg = config_try_load(ctx, path);
++		pkg = config_try_load(ctx, path, &found);
+ 	}
+ 
+ 	if (!pkg) {
+-		ULOG_ERR("no usable configuration\n");
++		if (found)
++			ULOG_ERR("no usable configuration\n");
++		else
++			ULOG_INFO("no usable configuration\n");
++		uci_free_context(ctx);
+ 		return -1;
+ 	}
+ 
