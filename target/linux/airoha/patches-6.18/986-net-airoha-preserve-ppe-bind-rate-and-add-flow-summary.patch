@@ -1,0 +1,286 @@
+From: grislux55 <jebchou.hg@gmail.com>
+Subject: [PATCH] net: airoha: preserve PPE bind_rate across hw_init and add summary debugfs
+
+airoha_ppe_offload_setup() runs lazily on the first offloaded flow and invokes
+airoha_ppe_hw_init(), which wrote a hardcoded 0x1e threshold back to
+REG_PPE_BIND_RATE and overwrote values written earlier via ppe/bind_rate.
+
+Store the configured L2B and L3 bind-rate thresholds in module parameters and
+apply them inside airoha_ppe_hw_init(). Add a software-indexed ppe/summary
+debugfs file backed by eth->flow_table so telemetry readers avoid scanning all
+16K SRAM FOE slots under ppe_lock via REG_PPE_RAM_CTRL.
+
+Signed-off-by: grislux55 <jebchou.hg@gmail.com>
+---
+--- a/drivers/net/ethernet/airoha/airoha_eth.h
++++ b/drivers/net/ethernet/airoha/airoha_eth.h
+@@ -877,10 +877,26 @@
+ void airoha_eth_set_napi_budget(struct airoha_eth *eth,
+ 				unsigned int rx_weight,
+ 				unsigned int tx_weight);
++struct airoha_ppe_flow_summary {
++	u32 total;
++	u32 bind;
++	u32 unbind;
++	u32 fin;
++	u32 l2b;
++	u32 ipv4;
++	u32 ipv6;
++	bool hw_init;
++};
++
+ void airoha_ppe_get_aging(struct airoha_ppe *ppe, u16 *non_l4, u16 *udp,
+ 			  u16 *tcp, u16 *tcp_fin);
+ void airoha_ppe_set_aging(struct airoha_ppe *ppe, u16 non_l4, u16 udp,
+ 			  u16 tcp, u16 tcp_fin);
++void airoha_ppe_get_bind_rate(struct airoha_ppe *ppe, int index,
++			      u16 *l2b, u16 *l3);
++void airoha_ppe_set_bind_rate(struct airoha_ppe *ppe, u16 l2b, u16 l3);
++void airoha_ppe_get_flow_summary(struct airoha_ppe *ppe,
++				 struct airoha_ppe_flow_summary *sum);
+ bool airoha_ppe_is_enabled(struct airoha_eth *eth, int index);
+ void airoha_ppe_check_skb(struct airoha_ppe_dev *dev, struct sk_buff *skb,
+ 			  u16 hash, bool rx_wlan);
+--- a/drivers/net/ethernet/airoha/airoha_ppe.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe.c
+@@ -51,6 +51,16 @@
+ MODULE_PARM_DESC(ppe_age_tcp_fin,
+ 		 "PPE TCP FIN entry aging delta in seconds");
+ 
++static unsigned int ppe_bind_rate_l2b = 0x1e;
++module_param(ppe_bind_rate_l2b, uint, 0644);
++MODULE_PARM_DESC(ppe_bind_rate_l2b,
++		 "PPE L2 bridge bind rate threshold in packets per second");
++
++static unsigned int ppe_bind_rate_l3 = 0x1e;
++module_param(ppe_bind_rate_l3, uint, 0644);
++MODULE_PARM_DESC(ppe_bind_rate_l3,
++		 "PPE L3 bind rate threshold in packets per second");
++
+ static const struct rhashtable_params airoha_flow_table_params = {
+ 	.head_offset = offsetof(struct airoha_flow_table_entry, node),
+ 	.key_offset = offsetof(struct airoha_flow_table_entry, cookie),
+@@ -210,11 +220,58 @@
+ 		airoha_ppe_program_aging(eth, i, non_l4, udp, tcp, tcp_fin);
+ }
+ 
++static void airoha_ppe_program_bind_rate(struct airoha_eth *eth, int index,
++					 u16 l2b, u16 l3)
++{
++	airoha_fe_rmw(eth, REG_PPE_BIND_RATE(index),
++		      PPE_BIND_RATE_L2B_BIND_MASK | PPE_BIND_RATE_BIND_MASK,
++		      FIELD_PREP(PPE_BIND_RATE_L2B_BIND_MASK, l2b) |
++		      FIELD_PREP(PPE_BIND_RATE_BIND_MASK, l3));
++}
++
++void airoha_ppe_get_bind_rate(struct airoha_ppe *ppe, int index,
++			      u16 *l2b, u16 *l3)
++{
++	struct airoha_eth *eth = ppe->eth;
++	u32 rate;
++
++	if (!rcu_access_pointer(eth->npu)) {
++		*l2b = clamp_t(unsigned int, READ_ONCE(ppe_bind_rate_l2b),
++			       1, 0xffff);
++		*l3 = clamp_t(unsigned int, READ_ONCE(ppe_bind_rate_l3),
++			      1, 0xffff);
++		return;
++	}
++
++	rate = airoha_fe_rr(eth, REG_PPE_BIND_RATE(index));
++	*l2b = FIELD_GET(PPE_BIND_RATE_L2B_BIND_MASK, rate);
++	*l3 = FIELD_GET(PPE_BIND_RATE_BIND_MASK, rate);
++}
++
++void airoha_ppe_set_bind_rate(struct airoha_ppe *ppe, u16 l2b, u16 l3)
++{
++	struct airoha_eth *eth = ppe->eth;
++	int i;
++
++	l2b = max_t(u16, l2b, 1);
++	l3 = max_t(u16, l3, 1);
++
++	WRITE_ONCE(ppe_bind_rate_l2b, l2b);
++	WRITE_ONCE(ppe_bind_rate_l3, l3);
++
++	for (i = 0; i < eth->soc->num_ppe; i++)
++		airoha_ppe_program_bind_rate(eth, i, l2b, l3);
++}
++
+ static void airoha_ppe_hw_init(struct airoha_ppe *ppe)
+ {
+ 	u32 sram_ppe_num_data_entries = PPE_SRAM_NUM_ENTRIES, sram_num_entries;
+ 	u32 sram_tb_size, dram_num_entries;
+ 	struct airoha_eth *eth = ppe->eth;
++	u16 bind_l2b = clamp_t(unsigned int, READ_ONCE(ppe_bind_rate_l2b),
++			       1, 0xffff);
++	u16 bind_l3 = clamp_t(unsigned int, READ_ONCE(ppe_bind_rate_l3),
++			      1, 0xffff);
+ 	u16 non_l4 = clamp_t(unsigned int, READ_ONCE(ppe_age_non_l4),
+ 			     1, 0x7fff);
+ 	u16 udp = clamp_t(unsigned int, READ_ONCE(ppe_age_udp), 1, 0x7fff);
+@@ -265,11 +322,7 @@
+ 			      FIELD_PREP(PPE_DRAM_TB_NUM_ENTRY_MASK,
+ 					 dram_num_entries));
+ 
+-		airoha_fe_rmw(eth, REG_PPE_BIND_RATE(i),
+-			      PPE_BIND_RATE_L2B_BIND_MASK |
+-			      PPE_BIND_RATE_BIND_MASK,
+-			      FIELD_PREP(PPE_BIND_RATE_L2B_BIND_MASK, 0x1e) |
+-			      FIELD_PREP(PPE_BIND_RATE_BIND_MASK, 0x1e));
++		airoha_ppe_program_bind_rate(eth, i, bind_l2b, bind_l3);
+ 
+ 		airoha_fe_wr(eth, REG_PPE_HASH_SEED(i), PPE_HASH_SEED);
+ 		airoha_fe_clear(eth, REG_PPE_PPE_FLOW_CFG(i),
+@@ -1096,6 +1149,77 @@
+ 	}
+ }
+ 
++void airoha_ppe_get_flow_summary(struct airoha_ppe *ppe,
++				 struct airoha_ppe_flow_summary *sum)
++{
++	struct airoha_eth *eth = ppe->eth;
++	struct airoha_flow_table_entry *e;
++	struct rhashtable_iter iter;
++
++	memset(sum, 0, sizeof(*sum));
++	sum->hw_init = !!rcu_access_pointer(eth->npu);
++
++	mutex_lock(&flow_offload_mutex);
++	rhashtable_walk_enter(&eth->flow_table, &iter);
++	rhashtable_walk_start(&iter);
++	while ((e = rhashtable_walk_next(&iter))) {
++		u32 ib1, pkt_type, state;
++
++		if (IS_ERR(e))
++			continue;
++
++		if (READ_ONCE(e->type) == FLOW_TYPE_L2) {
++			struct airoha_flow_table_entry *sub;
++			bool has_sub = false;
++
++			spin_lock_bh(&ppe_lock);
++			hlist_for_each_entry(sub, &e->l2_flows,
++					     l2_subflow_node) {
++				has_sub = true;
++				sum->total++;
++				sum->l2b++;
++				if (READ_ONCE(sub->hash) != 0xffff)
++					sum->bind++;
++				else
++					sum->unbind++;
++			}
++			spin_unlock_bh(&ppe_lock);
++
++			if (!has_sub) {
++				sum->total++;
++				sum->l2b++;
++				sum->unbind++;
++			}
++			continue;
++		}
++
++		sum->total++;
++		ib1 = READ_ONCE(e->data.ib1);
++		pkt_type = FIELD_GET(AIROHA_FOE_IB1_BIND_PACKET_TYPE, ib1);
++		if (pkt_type == PPE_PKT_TYPE_BRIDGE)
++			sum->l2b++;
++		else if (pkt_type >= PPE_PKT_TYPE_IPV6_ROUTE_3T)
++			sum->ipv6++;
++		else
++			sum->ipv4++;
++
++		if (READ_ONCE(e->hash) == 0xffff) {
++			sum->unbind++;
++		} else {
++			state = FIELD_GET(AIROHA_FOE_IB1_BIND_STATE, ib1);
++			if (state == AIROHA_FOE_STATE_FIN)
++				sum->fin++;
++			else if (state == AIROHA_FOE_STATE_BIND)
++				sum->bind++;
++			else
++				sum->unbind++;
++		}
++	}
++	rhashtable_walk_stop(&iter);
++	rhashtable_walk_exit(&iter);
++	mutex_unlock(&flow_offload_mutex);
++}
++
+ void airoha_ppe_flush_pon_flows(struct airoha_eth *eth)
+ {
+ 	int i, j;
+--- a/drivers/net/ethernet/airoha/airoha_ppe_debugfs.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe_debugfs.c
+@@ -269,17 +269,31 @@
+ }
+ DEFINE_SHOW_ATTRIBUTE(airoha_ppe_debugfs_lro_state);
+ 
++static int airoha_ppe_debugfs_summary_show(struct seq_file *m, void *private)
++{
++	struct airoha_ppe *ppe = m->private;
++	struct airoha_ppe_flow_summary sum;
++
++	airoha_ppe_get_flow_summary(ppe, &sum);
++	seq_printf(m,
++		   "total=%u bind=%u unbind=%u fin=%u l2b=%u ipv4=%u ipv6=%u hw_init=%u\n",
++		   sum.total, sum.bind, sum.unbind, sum.fin,
++		   sum.l2b, sum.ipv4, sum.ipv6, sum.hw_init);
++
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(airoha_ppe_debugfs_summary);
++
+ static int airoha_ppe_debugfs_bind_rate_show(struct seq_file *m, void *private)
+ {
+ 	struct airoha_ppe *ppe = m->private;
+ 	unsigned int i;
+ 
+ 	for (i = 0; i < ppe->eth->soc->num_ppe; i++) {
+-		u32 rate = airoha_fe_rr(ppe->eth, REG_PPE_BIND_RATE(i));
++		u16 l2b, l3;
+ 
+-		seq_printf(m, "ppe%u: l2b=%lu l3=%lu\n", i,
+-			   FIELD_GET(PPE_BIND_RATE_L2B_BIND_MASK, rate),
+-			   FIELD_GET(PPE_BIND_RATE_BIND_MASK, rate));
++		airoha_ppe_get_bind_rate(ppe, i, &l2b, &l3);
++		seq_printf(m, "ppe%u: l2b=%u l3=%u\n", i, l2b, l3);
+ 	}
+ 
+ 	return 0;
+@@ -298,7 +312,7 @@
+ {
+ 	struct seq_file *m = file->private_data;
+ 	struct airoha_ppe *ppe = m->private;
+-	unsigned int l2b, l3, i;
++	unsigned int l2b, l3;
+ 	char buf[32];
+ 	int ret;
+ 
+@@ -313,15 +327,10 @@
+ 		l3 = l2b;
+ 	else if (ret != 2)
+ 		return -EINVAL;
+-	if (l2b > 0xffff || l3 > 0xffff)
++	if (!l2b || l2b > 0xffff || !l3 || l3 > 0xffff)
+ 		return -ERANGE;
+ 
+-	for (i = 0; i < ppe->eth->soc->num_ppe; i++)
+-		airoha_fe_rmw(ppe->eth, REG_PPE_BIND_RATE(i),
+-			      PPE_BIND_RATE_L2B_BIND_MASK |
+-			      PPE_BIND_RATE_BIND_MASK,
+-			      FIELD_PREP(PPE_BIND_RATE_L2B_BIND_MASK, l2b) |
+-			      FIELD_PREP(PPE_BIND_RATE_BIND_MASK, l3));
++	airoha_ppe_set_bind_rate(ppe, l2b, l3);
+ 
+ 	return count;
+ }
+@@ -508,6 +517,8 @@
+ 	ppe->debugfs_dir = debugfs_create_dir("ppe", NULL);
+ 	debugfs_create_file("config", 0444, ppe->debugfs_dir, ppe,
+ 			    &airoha_ppe_debugfs_config_fops);
++	debugfs_create_file("summary", 0444, ppe->debugfs_dir, ppe,
++			    &airoha_ppe_debugfs_summary_fops);
+ 	debugfs_create_file("bind_rate", 0644, ppe->debugfs_dir, ppe,
+ 			    &airoha_ppe_debugfs_bind_rate_fops);
+ 	debugfs_create_file("pon_pbit_offload", 0644, ppe->debugfs_dir, ppe,

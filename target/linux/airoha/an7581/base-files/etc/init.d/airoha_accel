@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 
 # shellcheck disable=SC2034
-START=98
+START=18
 # shellcheck disable=SC2034
 USE_PROCD=1
 
@@ -14,6 +14,57 @@ is_valid_rate() {
 		''|*[!0-9]*) return 1 ;;
 	esac
 	[ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+seed_qdma_irq_affinity() {
+	[ -d /sys/devices/system/cpu/cpu3 ] || return 0
+	[ -r /proc/interrupts ] || return 0
+
+	qdma_irqs="$(awk '
+		$NF ~ /^airoha_eth\.[0-7]$/ {
+			irq = $1
+			sub(/:$/, "", irq)
+			print irq ":" $NF
+		}
+	' /proc/interrupts)"
+	[ -n "$qdma_irqs" ] || return 0
+
+	for entry in $qdma_irqs; do
+		irq="${entry%%:*}"
+		eff_path="/proc/irq/$irq/effective_affinity_list"
+		[ -r "$eff_path" ] || return 0
+		[ "$(cat "$eff_path" 2>/dev/null)" = "0" ] || return 0
+	done
+
+	for entry in $qdma_irqs; do
+		irq="${entry%%:*}"
+		name="${entry#*:}"
+		case "$name" in
+			airoha_eth.0|airoha_eth.6) target_cpu=0 ;;
+			airoha_eth.1|airoha_eth.7) target_cpu=1 ;;
+			airoha_eth.2|airoha_eth.4) target_cpu=2 ;;
+			airoha_eth.3|airoha_eth.5) target_cpu=3 ;;
+			*) continue ;;
+		esac
+		[ -w "/proc/irq/$irq/smp_affinity_list" ] || continue
+		printf '%s\n' "$target_cpu" > "/proc/irq/$irq/smp_affinity_list" 2>/dev/null || true
+	done
+
+	pon_irq="$(awk '
+		$NF == "1fb64000.ethernet" {
+			irq = $1
+			sub(/:$/, "", irq)
+			print irq
+			exit
+		}
+	' /proc/interrupts)"
+	if [ -n "$pon_irq" ] && [ -w "/proc/irq/$pon_irq/smp_affinity_list" ] && [ "$(cat "/proc/irq/$pon_irq/effective_affinity_list" 2>/dev/null)" = "0" ]; then
+		printf '1\n' > "/proc/irq/$pon_irq/smp_affinity_list" 2>/dev/null || true
+	fi
+
+	if [ "$(cat /sys/class/net/eth0/queues/rx-0/rps_cpus 2>/dev/null || echo 0)" != "0" ] && [ -x /etc/init.d/packet_steering ]; then
+		/etc/init.d/packet_steering reload >/dev/null 2>&1 || true
+	fi
 }
 
 apply_ppe_bind_rate() {
@@ -38,6 +89,7 @@ apply_ppe_bind_rate() {
 }
 
 start_service() {
+	seed_qdma_irq_affinity
 	apply_ppe_bind_rate
 }
 

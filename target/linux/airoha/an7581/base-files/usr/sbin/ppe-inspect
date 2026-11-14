@@ -23,7 +23,12 @@ else
 fi
 
 echo "[2] PPE Entries Summary"
-if [ -r "$PPE_DIR/entries" ]; then
+if [ -r "$PPE_DIR/summary" ]; then
+	cat "$PPE_DIR/summary"
+	if [ "$SHOW_RAW" -eq 1 ] && [ -r "$PPE_DIR/entries" ]; then
+		cat "$PPE_DIR/entries"
+	fi
+elif [ -r "$PPE_DIR/entries" ]; then
 	awk '
 		BEGIN { total=0; bind=0; unbind=0; fin=0; l2b=0; ipv4=0; ipv6=0; }
 		NF > 0 {
