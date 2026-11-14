@@ -28,7 +28,19 @@ gemtek,xg2010g)
 	ucidef_set_led_netdev "lan4-yellow" "lan4" "yellow:lan-4" "lan4" "link_10 link_100"
 	ucidef_set_led_netdev "lan4-green" "lan4" "green:lan-4" "lan4" "link_1000 tx rx"
 	;;
-nokia,xg-040g-md-ubi|\
+nokia,xg-040g-md-ubi)
+	ucidef_set_led_default "power" "power" "green:power" "1"
+	_ucidef_set_led_trigger "power" "power" "green:power" "default-on"
+	_ucidef_set_led_trigger "pon" "pon" "green:wan" "pon0-registration"
+	_ucidef_set_led_trigger "los" "los" "red:wan" "pon0-los"
+	_ucidef_set_led_trigger "internet" "internet" "green:wan-online" "pon0-online"
+	ucidef_set_led_netdev "lan1" "lan1" "mt7530-0:0f:green:lan-1" "lan1" "link tx rx"
+	ucidef_set_led_netdev "lan2" "lan2" "mt7530-0:0a:green:lan-2" "lan2" "link tx rx"
+	ucidef_set_led_netdev "lan3" "lan3" "mt7530-0:0b:green:lan-3" "lan3" "link tx rx"
+	ucidef_set_led_netdev "lan4" "lan4" "mt7530-0:0c:green:lan-4" "lan4" "link tx rx"
+	ucidef_set_led_usbport "usb1" "USB 1" "green:usb-1" "usb1-port1" "usb2-port1"
+	ucidef_set_led_usbport "usb2" "USB 2" "green:usb-2" "usb3-port1" "usb4-port1"
+	;;
 nokia,xg-040g-tf-ubi)
 	ucidef_set_led_netdev "lan2" "lan2" "mt7530-0:0a:green:lan-2" "lan2" "link tx rx"
 	ucidef_set_led_netdev "lan3" "lan3" "mt7530-0:0b:green:lan-3" "lan3" "link tx rx"
