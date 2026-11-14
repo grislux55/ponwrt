@@ -59,14 +59,15 @@ else
 fi
 
 echo "[3/5] Checking feeds.conf.default and target configs..."
-grep -qE '^src-git[[:space:]]+pon_drivers[[:space:]]+https://' feeds.conf.default || fail "feeds.conf.default missing https:// pon_drivers"
-grep -qE '^src-git[[:space:]]+pon_userspace[[:space:]]+https://' feeds.conf.default || fail "feeds.conf.default missing https:// pon_userspace"
+grep -qE '^src-git[[:space:]]+nnrrwrt_drivers[[:space:]]+https://github\.com/grislux55/nnrrwrt-drivers\.git$' feeds.conf.default || fail "feeds.conf.default missing https://github.com/grislux55/nnrrwrt-drivers.git"
+grep -qE '^src-git[[:space:]]+nnrrwrt_packages[[:space:]]+https://github\.com/grislux55/nnrrwrt-packages\.git$' feeds.conf.default || fail "feeds.conf.default missing https://github.com/grislux55/nnrrwrt-packages.git"
 grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y$' configs/an7581.config || fail "an7581.config missing nokia_xg-040g-md-ubi"
 grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi-usb-sfp=y$' configs/an7581.config || fail "an7581.config missing nokia_xg-040g-md-ubi-usb-sfp"
 [ -f configs/nnrrwrt-xg040g-md.config ] || fail "Missing configs/nnrrwrt-xg040g-md.config"
 grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y$' configs/nnrrwrt-xg040g-md.config || fail "nnrrwrt-xg040g-md.config missing nokia_xg-040g-md-ubi"
 grep -q '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi-usb-sfp=y$' configs/nnrrwrt-xg040g-md.config || fail "nnrrwrt-xg040g-md.config missing nokia_xg-040g-md-ubi-usb-sfp"
 grep -q '^CONFIG_VERSION_DIST="NNRRWrt"$' configs/nnrrwrt-xg040g-md.config || fail "nnrrwrt-xg040g-md.config missing VERSION_DIST=NNRRWrt"
+grep -q '^CONFIG_VERSION_HOME_URL="https://github.com/grislux55/nnrrwrt"$' configs/nnrrwrt-xg040g-md.config || fail "nnrrwrt-xg040g-md.config missing VERSION_HOME_URL"
 if grep -qE '^CONFIG_PACKAGE_(wpad|hostapd|wifi-scripts|wireless-regdb|iw|kmod-cfg80211|kmod-mac80211|kmod-mt76|kmod-mt79).*=[ym]$' configs/nnrrwrt-xg040g-md.config; then
 	fail "nnrrwrt-xg040g-md.config must not enable wireless stack or drivers"
 fi

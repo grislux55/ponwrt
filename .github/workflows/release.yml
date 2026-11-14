@@ -172,11 +172,13 @@ jobs:
 
       - name: Load repository signing key
         env:
+          NNRRWRT_APK_PRIVATE_KEY: ${{ secrets.NNRRWRT_APK_PRIVATE_KEY }}
           PONWRT_APK_PRIVATE_KEY: ${{ secrets.PONWRT_APK_PRIVATE_KEY }}
         run: |
-          if [ -n "$PONWRT_APK_PRIVATE_KEY" ]; then
+          signing_key="${NNRRWRT_APK_PRIVATE_KEY:-$PONWRT_APK_PRIVATE_KEY}"
+          if [ -n "$signing_key" ]; then
             umask 077
-            printf '%s\n' "$PONWRT_APK_PRIVATE_KEY" > private-key.pem
+            printf '%s\n' "$signing_key" > private-key.pem
             openssl ec -in private-key.pem -pubout -out public-key.pem
           fi
 
@@ -212,8 +214,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: dl
-          key: ponwrt-dl-${{ matrix.target }}-${{ hashFiles('feeds.conf.default', 'configs/*.config') }}
+          key: nnrrwrt-dl-${{ matrix.target }}-${{ hashFiles('feeds.conf.default', 'configs/*.config') }}
           restore-keys: |
+            nnrrwrt-dl-${{ matrix.target }}-
             ponwrt-dl-${{ matrix.target }}-
 
       - name: Cache tools and toolchain
@@ -223,7 +226,7 @@ jobs:
           path: |
             staging_dir/host
             staging_dir/toolchain-*
-          key: ponwrt-toolchain-v1-${{ matrix.target }}-${{ hashFiles('tools/**', 'toolchain/**', 'package/system/apk/**', 'package/system/fwtool/**', 'package/system/ucert/**', 'package/system/usign/**', 'package/libs/libubox/**', 'package/libs/libjson-c/**', 'include/host-build.mk', 'include/toolchain-build.mk', 'include/subdir.mk', 'include/kernel-version.mk', 'include/prereq-build.mk', 'rules.mk', 'Makefile', 'tmp/toolchain-cache-key.txt') }}
+          key: nnrrwrt-toolchain-v1-${{ matrix.target }}-${{ hashFiles('tools/**', 'toolchain/**', 'package/system/apk/**', 'package/system/fwtool/**', 'package/system/ucert/**', 'package/system/usign/**', 'package/libs/libubox/**', 'package/libs/libjson-c/**', 'include/host-build.mk', 'include/toolchain-build.mk', 'include/subdir.mk', 'include/kernel-version.mk', 'include/prereq-build.mk', 'rules.mk', 'Makefile', 'tmp/toolchain-cache-key.txt') }}
 
       - name: Cache host packages and language toolchains
         id: cache-hostpkg
@@ -234,14 +237,15 @@ jobs:
             staging_dir/target-*/host
             build_dir/hostpkg
             build_dir/target-*/host
-          key: ponwrt-hostpkg-v1-${{ matrix.target }}-${{ hashFiles('tools/**', 'toolchain/**', 'package/system/apk/**', 'package/utils/ucode/**', 'package/libs/libubox/**', 'package/libs/ncurses/**', 'package/libs/libffi/**', 'package/libs/libjson-c/**', 'package/utils/lua/**', 'package/utils/bzip2/**', 'package/system/fwtool/**', 'package/system/usign/**', 'package/system/ucert/**', 'package/boot/arm-trusted-firmware-tools/**', 'package/boot/arm-trusted-firmware-airoha/**', 'include/host-build.mk', 'include/toolchain-build.mk', 'include/subdir.mk', 'include/kernel-version.mk', 'include/prereq-build.mk', 'include/rust-values.mk', 'rules.mk', 'Makefile', 'tmp/hostpkg-cache-key.txt') }}
+          key: nnrrwrt-hostpkg-v1-${{ matrix.target }}-${{ hashFiles('tools/**', 'toolchain/**', 'package/system/apk/**', 'package/utils/ucode/**', 'package/libs/libubox/**', 'package/libs/ncurses/**', 'package/libs/libffi/**', 'package/libs/libjson-c/**', 'package/utils/lua/**', 'package/utils/bzip2/**', 'package/system/fwtool/**', 'package/system/usign/**', 'package/system/ucert/**', 'package/boot/arm-trusted-firmware-tools/**', 'package/boot/arm-trusted-firmware-airoha/**', 'include/host-build.mk', 'include/toolchain-build.mk', 'include/subdir.mk', 'include/kernel-version.mk', 'include/prereq-build.mk', 'include/rust-values.mk', 'rules.mk', 'Makefile', 'tmp/hostpkg-cache-key.txt') }}
 
       - name: Cache ccache
         uses: actions/cache@v4
         with:
           path: .ccache
-          key: ponwrt-ccache-v1-${{ matrix.target }}-${{ github.sha }}
+          key: nnrrwrt-ccache-v1-${{ matrix.target }}-${{ github.sha }}
           restore-keys: |
+            nnrrwrt-ccache-v1-${{ matrix.target }}-
             ponwrt-ccache-v1-${{ matrix.target }}-
 
       - name: Download sources
@@ -347,7 +351,7 @@ jobs:
         run: |
           mkdir -p release
           subtarget_dir="$TARGET_NAME"
-          archive_name="ponwrt-${TARGET_NAME}.tar.zst"
+          archive_name="nnrrwrt-${TARGET_NAME}.tar.zst"
           if [ "$TARGET_NAME" = "nnrrwrt-xg040g-md" ]; then
             subtarget_dir="an7581"
             archive_name="nnrrwrt-xg040g-md.tar.zst"
