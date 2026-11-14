@@ -22,13 +22,18 @@ case "$cur_zonename:$cur_timezone" in
 	:|UTC:|UTC:GMT0|UTC:UTC|:GMT0|:UTC)
 		uci set system.@system[0].zonename='Asia/Shanghai'
 		uci set system.@system[0].timezone='CST-8'
+		fresh_system=1
 		;;
 esac
 
 if [ -f /etc/config/irqbalance ]; then
-	cur_irqb="$(uci -q get irqbalance.irqbalance.enabled || true)"
-	if [ "$fresh_system" -eq 1 ] && [ "${cur_irqb:-0}" = "0" ]; then
-		uci set irqbalance.irqbalance.enabled='1'
+	irqb_init="$(uci -q get irqbalance.irqbalance.nnrrwrt_init || true)"
+	if [ "$irqb_init" != "1" ]; then
+		cur_irqb="$(uci -q get irqbalance.irqbalance.enabled || true)"
+		if [ "${cur_irqb:-0}" = "0" ]; then
+			uci set irqbalance.irqbalance.enabled='1'
+		fi
+		uci set irqbalance.irqbalance.nnrrwrt_init='1'
 	fi
 fi
 
