@@ -147,7 +147,7 @@ $sysfs"
 	json_cleanup
 }
 
-converge_tailscale_defaults() {
+disable_unconfigured_tailscale() {
 	[ -f /etc/config/tailscale ] || return 0
 
 	local ts_dirty=0
@@ -177,7 +177,7 @@ converge_tailscale_defaults() {
 	fi
 }
 
-converge_ddns_defaults() {
+disable_unconfigured_ddns() {
 	[ -f /etc/config/ddns ] || return 0
 
 	local ddns_dirty=0
@@ -221,7 +221,7 @@ backfill_board_leds
 uci commit system
 [ -f /etc/config/irqbalance ] && uci commit irqbalance
 [ -f /etc/config/uhttpd ] && uci commit uhttpd
-converge_tailscale_defaults
-converge_ddns_defaults
+disable_unconfigured_tailscale
+disable_unconfigured_ddns
 
 exit 0
