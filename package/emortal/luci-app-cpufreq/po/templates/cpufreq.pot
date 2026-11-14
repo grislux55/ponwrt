@@ -1,0 +1,86 @@
+msgid ""
+msgstr "Content-Type: text/plain; charset=UTF-8"
+
+msgid "<h4>Apply for CPU %s.</h4>"
+msgstr ""
+
+msgid "CPU Freq"
+msgstr ""
+
+msgid "CPU Freq Settings"
+msgstr ""
+
+msgid "CPU Scaling Governor"
+msgstr ""
+
+msgid "CPU Switching Sampling rate"
+msgstr ""
+
+msgid "CPU Switching Threshold"
+msgstr ""
+
+msgid "CPU stays at the selected frequency in this mode."
+msgstr ""
+
+msgid "CPU stays at the selected power-saving frequency."
+msgstr ""
+
+msgid "Configure CPU scaling governor and operating frequencies."
+msgstr ""
+
+msgid "Expecting: %s"
+msgstr ""
+
+msgid "Grant access to CPUFreq configuration"
+msgstr ""
+
+msgid "Kernel make a decision on whether it should increase the frequency (%)"
+msgstr ""
+
+msgid "Locked CPU Frequency"
+msgstr ""
+
+msgid "Lower frequency bound during idle or light load."
+msgstr ""
+
+msgid "Max CPU Freq cannot be lower than Min CPU Freq."
+msgstr ""
+
+msgid "Maximum Scaling Frequency"
+msgstr ""
+
+msgid "Minimum Idle Frequency"
+msgstr ""
+
+msgid "Power-Saving CPU Frequency"
+msgstr ""
+
+msgid "The sampling rate determines how frequently the governor checks to tune the CPU (ms)"
+msgstr ""
+
+msgid "Unsupported device!"
+msgstr ""
+
+msgid "Upper frequency bound under load."
+msgstr ""
+
+msgid "Your device/kernel does not support CPU frequency scaling."
+msgstr ""
+
+msgid "conservative (Stepwise dynamic scaling)"
+msgstr ""
+
+msgid "ondemand (Threshold-triggered scaling)"
+msgstr ""
+
+msgid "performance (Lock target frequency)"
+msgstr ""
+
+msgid "powersave (Lock power-saving frequency)"
+msgstr ""
+
+msgid "schedutil (Load-guided dynamic scaling)"
+msgstr ""
+
+msgid "userspace (Fixed manual frequency)"
+msgstr ""
